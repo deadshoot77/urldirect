@@ -1,0 +1,26 @@
+# dependencies
+/node_modules
+
+# next.js
+/.next
+/out
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# env
+.env
+.env.local
+.env.*.local
+
+# local database
+/data/*.db
+/data/*.db-shm
+/data/*.db-wal
+
+# os
+.DS_Store
+Thumbs.db

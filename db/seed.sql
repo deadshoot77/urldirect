@@ -1,0 +1,1 @@
+-- Seed rows are included in db/migrations.sql.

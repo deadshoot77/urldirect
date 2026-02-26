@@ -1,0 +1,1 @@
+-- Deprecated: use db/migrations.sql for the full Supabase/Postgres schema.
