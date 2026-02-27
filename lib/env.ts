@@ -13,7 +13,20 @@ const envSchema = z.object({
     .pipe(z.union([z.literal(301), z.literal(302)])),
   ADMIN_PASSWORD: z.string().min(10, "ADMIN_PASSWORD must be at least 10 chars"),
   AUTH_SECRET: z.string().min(32, "AUTH_SECRET must be at least 32 chars"),
-  IP_HASH_SALT: z.string().min(16, "IP_HASH_SALT must be at least 16 chars")
+  IP_HASH_SALT: z.string().min(16, "IP_HASH_SALT must be at least 16 chars"),
+  CLICK_LIMIT_MONTHLY: z
+    .string()
+    .optional()
+    .default("10000")
+    .transform((value) => Number(value))
+    .pipe(z.number().int().positive()),
+  TRACKING_ENABLED_DEFAULT: z
+    .enum(["true", "false"])
+    .optional()
+    .default("true")
+    .transform((value) => value === "true"),
+  TRACKING_LIMIT_BEHAVIOR: z.enum(["drop", "minimal"]).optional().default("drop"),
+  ADMIN_PLAN_DEFAULT: z.enum(["free", "pro"]).optional().default("free")
 });
 
 const parsed = envSchema.safeParse(process.env);

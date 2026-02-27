@@ -1,6 +1,9 @@
 export type RedirectStatus = 301 | 302;
 export type DeviceType = "mobile" | "desktop" | "bot" | "unknown";
 export type PixelType = "meta" | "tiktok" | "google" | "postback";
+export type AdminPlan = "free" | "pro";
+export type TrackingLimitBehavior = "drop" | "minimal";
+export type AnalyticsGranularity = "hours" | "days" | "months";
 export type JsonValue =
   | string
   | number
@@ -51,4 +54,76 @@ export interface PixelConfig {
   token?: string;
   event_name: string;
   custom_params?: Record<string, string | number | boolean>;
+}
+
+export interface RoutingRule {
+  id?: string;
+  name?: string;
+  destination_url: string;
+  devices?: string[];
+  countries?: string[];
+  languages?: string[];
+  enabled?: boolean;
+}
+
+export interface DeepLinksConfig {
+  ios_url?: string;
+  android_url?: string;
+  fallback_url?: string;
+}
+
+export interface RetargetingScript {
+  id?: string;
+  name?: string;
+  type?: "inline" | "external" | "pixel";
+  content?: string;
+  src?: string;
+  enabled?: boolean;
+}
+
+export interface ShortLink {
+  id: string;
+  slug: string;
+  destinationUrl: string;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string | null;
+  title: string | null;
+  isFavorite: boolean;
+  tags: string[];
+  redirectType: RedirectStatus;
+  routingRules: RoutingRule[];
+  deepLinks: DeepLinksConfig;
+  retargetingScripts: RetargetingScript[];
+  isActive: boolean;
+}
+
+export interface ShortLinkListItem extends ShortLink {
+  clicksReceived: number;
+  clicksToday: number;
+  lastClickAt: string | null;
+}
+
+export interface AdminSettings {
+  plan: AdminPlan;
+  clickLimitMonthly: number;
+  trackingEnabled: boolean;
+  limitBehavior: TrackingLimitBehavior;
+  usageThisMonth: number;
+  limitReached: boolean;
+}
+
+export interface LinkOverviewStats {
+  totalClicks: number;
+  qrScans: number;
+  clicksToday: number;
+  lastClickAt: string | null;
+  uniqueClicks: number;
+  nonUniqueClicks: number;
+}
+
+export interface TimeSeriesPoint {
+  bucketAt: string;
+  label: string;
+  clicks: number;
 }

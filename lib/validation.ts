@@ -39,3 +39,71 @@ export const redirectRuleInputSchema = z
       });
     }
   });
+
+const optionalUrlSchema = z
+  .union([z.string().url("must be a valid URL"), z.literal(""), z.null(), z.undefined()])
+  .transform((value) => {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  });
+
+export const routingRuleSchema = z.object({
+  id: z.string().trim().min(1).optional(),
+  name: z.string().trim().max(120).optional(),
+  destination_url: z.string().trim().url("destination_url must be a valid URL"),
+  devices: z.array(z.string().trim().min(1)).optional().default([]),
+  countries: z.array(z.string().trim().min(1).max(3)).optional().default([]),
+  languages: z.array(z.string().trim().min(1).max(20)).optional().default([]),
+  enabled: z.boolean().optional().default(true)
+});
+
+export const deepLinksSchema = z.object({
+  ios_url: optionalUrlSchema,
+  android_url: optionalUrlSchema,
+  fallback_url: optionalUrlSchema
+});
+
+export const retargetingScriptSchema = z.object({
+  id: z.string().trim().min(1).optional(),
+  name: z.string().trim().max(120).optional(),
+  type: z.enum(["inline", "external", "pixel"]).optional().default("inline"),
+  content: z.string().optional(),
+  src: optionalUrlSchema,
+  enabled: z.boolean().optional().default(true)
+});
+
+export const shortLinkCreateSchema = z.object({
+  slug: slugSchema,
+  destination_url: z.string().trim().url("destination_url must be a valid URL"),
+  title: z.union([z.string().trim().max(140), z.null(), z.undefined()]).optional(),
+  is_favorite: z.boolean().default(false),
+  tags: z.array(z.string().trim().min(1).max(40)).max(20).default([]),
+  redirect_type: z.union([z.literal(301), z.literal(302)]).default(302),
+  routing_rules: z.array(routingRuleSchema).default([]),
+  deep_links: deepLinksSchema.default({}),
+  retargeting_scripts: z.array(retargetingScriptSchema).default([]),
+  is_active: z.boolean().default(true)
+});
+
+export const shortLinkPatchSchema = shortLinkCreateSchema
+  .partial()
+  .extend({
+    slug: slugSchema.optional()
+  })
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "At least one field must be provided"
+  });
+
+export const adminSettingsPatchSchema = z
+  .object({
+    plan: z.enum(["free", "pro"]).optional(),
+    click_limit_monthly: z.number().int().positive().optional(),
+    tracking_enabled: z.boolean().optional(),
+    limit_behavior: z.enum(["drop", "minimal"]).optional()
+  })
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "At least one setting must be provided"
+  });
+
+export const analyticsGranularitySchema = z.enum(["hours", "days", "months"]);

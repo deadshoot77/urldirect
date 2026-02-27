@@ -1,18 +1,31 @@
-# Advanced Redirector (Next.js + Supabase + Netlify)
+# Redirect + Tracking Dashboard (Next.js + Supabase + Netlify)
 
-Redirect tool production-ready:
-- `/` and `/:slug` redirects
-- fallback to `DEFAULT_REDIRECT_URL`
-- query params merge (incoming overrides existing keys, repeated incoming keys preserved)
-- per-rule 301/302
-- admin dashboard (`/admin`) with password + signed httpOnly cookie
-- analytics (total, by slug, daily 7/30d, hourly, referers, devices, countries)
-- CSV export
-- server-side pixel/postback tracking (Meta, TikTok, Google webhook, custom postback)
+Advanced redirector with Rebrandly-like admin:
+- short links at `/:slug`
+- server-side tracking in `click_events`
+- routing rules (device/country/language)
+- deep links + retargeting scripts
+- admin links list: `/admin/links`
+- admin link detail + analytics report: `/admin/links/:id`
+- monthly tracking limit banner + plan locks (`free` / `pro`)
+
+## Features
+
+- Redirect resolution
+  - `/:slug` tries `short_links` first
+  - fallback to legacy `redirect_rules` if slug not found
+  - 301/302 per link
+- Tracking
+  - stores timestamp, slug, UA, referrer, hashed IP, geo headers, browser/device/platform, language, source, query params, UTM
+  - unique click detection on `(link_id, ip_hash)` over 24h
+- Limits/plan
+  - `admin_settings.plan` controls locked analytics cards
+  - `admin_settings.click_limit_monthly` + `limit_behavior` (`drop` or `minimal`)
+  - admin red banner when limit reached
 
 ## Environment Variables
 
-Copy `.env.example` to `.env.local` and fill:
+Use `.env.local`:
 
 ```env
 SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
@@ -25,11 +38,12 @@ DEFAULT_REDIRECT_STATUS=302
 ADMIN_PASSWORD=ChangeThisPasswordNow
 AUTH_SECRET=replace-with-a-very-long-random-secret-32-chars-min
 IP_HASH_SALT=replace-with-another-random-secret-16-chars-min
-```
 
-Security:
-- `SUPABASE_SERVICE_ROLE_KEY` is **server-only** (never expose to client).
-- admin auth does **not** use Supabase Auth.
+CLICK_LIMIT_MONTHLY=10000
+TRACKING_ENABLED_DEFAULT=true
+TRACKING_LIMIT_BEHAVIOR=drop
+ADMIN_PLAN_DEFAULT=free
+```
 
 ## Local Setup
 
@@ -46,100 +60,56 @@ copy .env.example .env.local
 npm run dev
 ```
 
-Admin login:
-- `http://localhost:3000/admin/login`
+## Supabase Setup (Required)
 
-## Supabase Setup (SQL)
+1. Open Supabase SQL Editor.
+2. Run the full file `db/migrations.sql`.
+3. Confirm tables exist:
+   - legacy: `redirect_rules`, `logs`, `pixel_logs`
+   - new: `short_links`, `click_events`, `admin_settings`
 
-1. Create a Supabase project.
-2. Open `SQL Editor`.
-3. Copy/paste the full file `db/migrations.sql`.
-4. Run it once.
+If `/api/admin/links` returns `Could not find table public.short_links`, the migration has not been applied yet.
 
-This migration creates:
-- tables: `redirect_rules`, `logs`, `pixel_logs`
-- indexes
-- RLS enabled on all tables
-- restrictive policies (`anon`/`authenticated` denied, `service_role` allowed)
-- RPC `resolve_redirect(...)` (resolve + log in one DB round-trip)
-- analytics RPCs (`stats_*`)
-- seed rules: `promo`, `docs`, `partner`
+## New Tables
 
-## Supabase Keys
+- `short_links`
+  - slug, destination_url, redirect_type, favorite/tags
+  - `routing_rules` jsonb
+  - `deep_links` jsonb
+  - `retargeting_scripts` jsonb
+- `click_events`
+  - detailed click analytics fields
+- `admin_settings`
+  - singleton row (`id=1`) with `plan`, tracking limit, behavior
 
-In Supabase dashboard:
-- `Project Settings` -> `API`
-- copy:
-  - `Project URL` -> `SUPABASE_URL`
-  - `anon public` -> `SUPABASE_ANON_KEY` (optional here)
-  - `service_role secret` -> `SUPABASE_SERVICE_ROLE_KEY`
+## Admin Routes
 
-## Deploy Netlify + Supabase
+- `/admin/login`
+- `/admin/links`
+- `/admin/links/:id`
 
-Already configured:
-- `netlify.toml`
-- `@netlify/plugin-nextjs`
+API:
+- `GET/POST /api/admin/links`
+- `GET/PATCH /api/admin/links/:id`
+- `GET/PATCH /api/admin/settings`
 
-Steps:
-1. Push repo to Git provider.
-2. Import project in Netlify.
-3. Add env vars in Netlify UI:
-   - `SUPABASE_URL`
-   - `SUPABASE_ANON_KEY` (optional)
-   - `SUPABASE_SERVICE_ROLE_KEY`
-   - `DEFAULT_REDIRECT_URL`
-   - `DEFAULT_REDIRECT_STATUS`
-   - `ADMIN_PASSWORD`
-   - `AUTH_SECRET`
-   - `IP_HASH_SALT`
-4. Deploy.
+## Manual Validation Flow
 
-No filesystem DB is required.
+1. Login on `/admin/login`.
+2. Open `/admin/links`.
+3. Create a link via **New link**.
+4. Click the short URL (`/:slug`) from another tab.
+5. Open `/admin/links/:id`.
+6. Check:
+   - **Overall performance** increments
+   - top sources/devices/countries update
+   - Hours/Days/Months toggle works
+7. Set `plan=free` in UI and verify locked cards display “Upgrade to reveal”.
 
-## cURL Tests
-
-### 1) Login admin
+## Build Check
 
 ```bash
-curl -i -c cookies.txt -X POST "http://localhost:3000/api/admin/login" \
-  -H "content-type: application/json" \
-  -d "{\"password\":\"ChangeThisPasswordNow\"}"
+npm run build
 ```
 
-### 2) Create/Update rule
-
-```bash
-curl -i -b cookies.txt -X POST "http://localhost:3000/api/admin/rules" \
-  -H "content-type: application/json" \
-  -d "{
-    \"slug\": \"offer2026\",
-    \"target_url\": \"https://example.com/landing?src=redirector\",
-    \"status_code\": 302,
-    \"is_active\": true,
-    \"pixel_enabled\": false
-  }"
-```
-
-### 3) List rules
-
-```bash
-curl -b cookies.txt "http://localhost:3000/api/admin/rules"
-```
-
-### 4) Delete rule
-
-```bash
-curl -i -b cookies.txt -X DELETE "http://localhost:3000/api/admin/rules?slug=offer2026"
-```
-
-### 5) Redirect test (query merge)
-
-```bash
-curl -I "http://localhost:3000/promo?utm_source=ig&ref=123"
-```
-
-### 6) Export CSV
-
-```bash
-curl -L -b cookies.txt "http://localhost:3000/api/admin/export" -o logs.csv
-```
+Build currently passes with the new admin pages and APIs.
