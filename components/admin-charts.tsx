@@ -111,7 +111,10 @@ const rebrandlyWords = {
     topDevices: "Top appareils",
     topLanguages: "Top langues",
     topPlatforms: "Top plateformes",
-    loadingMap: "Chargement de la carte..."
+    loadingMap: "Chargement de la carte...",
+    showCountries: "Afficher les pays",
+    hideCountries: "Masquer les pays",
+    otherCountries: "Autres pays"
   },
   en: {
     noData: "No data yet.",
@@ -138,7 +141,10 @@ const rebrandlyWords = {
     topDevices: "Top devices",
     topLanguages: "Top languages",
     topPlatforms: "Top platforms",
-    loadingMap: "Loading map..."
+    loadingMap: "Loading map...",
+    showCountries: "Show countries",
+    hideCountries: "Hide countries",
+    otherCountries: "Other countries"
   }
 } as const;
 
@@ -156,6 +162,13 @@ function formatLastClick(value: string | null, lang: AdminLang): string {
     hour: "2-digit",
     minute: "2-digit"
   });
+}
+
+function formatPercent(value: number, lang: AdminLang): string {
+  return new Intl.NumberFormat(lang === "fr" ? "fr-FR" : "en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(value);
 }
 
 function normalizeCountryCode(input: string): string | null {
@@ -213,6 +226,14 @@ async function loadWorldGeoFeatures(): Promise<WorldGeoFeature[]> {
 
 function WorldHeatMap({ data, lang }: { data: LabelCount[]; lang: AdminLang }) {
   const [features, setFeatures] = useState<WorldGeoFeature[]>(() => worldGeoFeaturesCache ?? []);
+  const [showCountries, setShowCountries] = useState(false);
+  const [hovered, setHovered] = useState<{
+    name: string;
+    share: number;
+    clicks: number;
+    x: number;
+    y: number;
+  } | null>(null);
   const copy = rebrandlyWords[lang];
 
   useEffect(() => {
@@ -226,15 +247,41 @@ function WorldHeatMap({ data, lang }: { data: LabelCount[]; lang: AdminLang }) {
     };
   }, []);
 
+  const totalClicks = useMemo(() => data.reduce((sum, entry) => sum + entry.clicks, 0), [data]);
+
   const clicksByCountryCode = useMemo(() => {
     const output = new Map<string, number>();
     for (const entry of data) {
       const code = normalizeCountryCode(entry.label);
       if (!code) continue;
-      output.set(code, entry.clicks);
+      output.set(code, (output.get(code) ?? 0) + entry.clicks);
     }
     return output;
   }, [data]);
+
+  const countryRows = useMemo(() => {
+    const rows = [...clicksByCountryCode.entries()]
+      .map(([code, clicks]) => ({
+        code,
+        clicks,
+        share: totalClicks > 0 ? (clicks / totalClicks) * 100 : 0,
+        name: toCountryName(code, lang)
+      }))
+      .sort((a, b) => b.clicks - a.clicks || a.name.localeCompare(b.name));
+
+    const unknownClicks = data
+      .filter((entry) => normalizeCountryCode(entry.label) === null)
+      .reduce((sum, entry) => sum + entry.clicks, 0);
+
+    const topCountries = rows.slice(0, 5);
+    const otherClicks = unknownClicks + rows.slice(5).reduce((sum, entry) => sum + entry.clicks, 0);
+
+    return {
+      topCountries,
+      otherClicks,
+      otherShare: totalClicks > 0 ? (otherClicks / totalClicks) * 100 : 0
+    };
+  }, [clicksByCountryCode, data, lang, totalClicks]);
 
   const maxClicks = useMemo(() => {
     let max = 0;
@@ -253,28 +300,85 @@ function WorldHeatMap({ data, lang }: { data: LabelCount[]; lang: AdminLang }) {
     return geoPath(projection);
   }, [features]);
 
+  function onCountryHover(
+    event: React.MouseEvent<SVGPathElement>,
+    countryName: string,
+    clicks: number
+  ) {
+    const svg = event.currentTarget.ownerSVGElement;
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    const x = Math.min(rect.width - 160, Math.max(12, event.clientX - rect.left + 14));
+    const y = Math.min(rect.height - 60, Math.max(12, event.clientY - rect.top - 8));
+    const share = totalClicks > 0 ? (clicks / totalClicks) * 100 : 0;
+    setHovered({
+      name: countryName,
+      share,
+      clicks,
+      x,
+      y
+    });
+  }
+
   return (
-    <div className="rb-world-map">
-      {!pathGenerator ? (
-        <p className="rb-muted">{copy.loadingMap}</p>
-      ) : (
-        <svg viewBox="0 0 1000 470" aria-label={copy.geoDistribution}>
-          <rect x="0" y="0" width="1000" height="470" fill="#070b10" />
-          {features.map((feature, index) => {
-            const iso3 = typeof feature.id === "string" ? feature.id.toUpperCase() : "";
-            const clicks = iso3 ? clicksByCountryCode.get(iso3) ?? 0 : 0;
-            const path = pathGenerator(feature as any);
-            if (!path) return null;
-            return (
-              <path key={`${iso3 || "country"}-${index}`} d={path} fill={mapHeatColor(clicks, maxClicks)} stroke="#5f6670" strokeWidth={0.45}>
-                <title>
-                  {toCountryName(iso3 || feature.properties?.name || "Unknown", lang)}: {formatNumber(clicks, lang)}
-                </title>
-              </path>
-            );
-          })}
-        </svg>
-      )}
+    <div className="rb-world-map-wrap">
+      <div className="rb-world-map">
+        {!pathGenerator ? (
+          <p className="rb-muted">{copy.loadingMap}</p>
+        ) : (
+          <svg viewBox="0 0 1000 470" aria-label={copy.geoDistribution}>
+            <rect x="0" y="0" width="1000" height="470" fill="#070b10" />
+            {features.map((feature, index) => {
+              const iso3 = typeof feature.id === "string" ? feature.id.toUpperCase() : "";
+              const countryName = toCountryName(iso3 || feature.properties?.name || "Unknown", lang);
+              const clicks = iso3 ? clicksByCountryCode.get(iso3) ?? 0 : 0;
+              const path = pathGenerator(feature as any);
+              if (!path) return null;
+              return (
+                <path
+                  key={`${iso3 || "country"}-${index}`}
+                  d={path}
+                  fill={mapHeatColor(clicks, maxClicks)}
+                  stroke="#5f6670"
+                  strokeWidth={0.45}
+                  onMouseMove={(event) => onCountryHover(event, countryName, clicks)}
+                  onMouseLeave={() => setHovered(null)}
+                />
+              );
+            })}
+          </svg>
+        )}
+
+        {hovered ? (
+          <div className="rb-map-tooltip" style={{ left: `${hovered.x}px`, top: `${hovered.y}px` }}>
+            <strong>{formatPercent(hovered.share, lang)}%</strong>
+            <span>{hovered.name}</span>
+            <small>{formatNumber(hovered.clicks, lang)}</small>
+          </div>
+        ) : null}
+      </div>
+
+      <button type="button" className="rb-country-toggle" onClick={() => setShowCountries((current) => !current)}>
+        {showCountries ? copy.hideCountries : copy.showCountries}
+        <span>{showCountries ? "▴" : "▾"}</span>
+      </button>
+
+      {showCountries ? (
+        <ul className="rb-country-list">
+          {countryRows.topCountries.map((country, index) => (
+            <li key={country.code} className={index === 0 ? "active" : ""}>
+              <span>{country.name}</span>
+              <strong>{formatPercent(country.share, lang)}%</strong>
+            </li>
+          ))}
+          {countryRows.otherClicks > 0 ? (
+            <li>
+              <span>{copy.otherCountries}</span>
+              <strong>{formatPercent(countryRows.otherShare, lang)}%</strong>
+            </li>
+          ) : null}
+        </ul>
+      ) : null}
     </div>
   );
 }
@@ -353,8 +457,6 @@ function RebrandlyCharts(props: RebrandlyChartsProps) {
     [props.clickType]
   );
 
-  const worldTotal = useMemo(() => props.worldMap.reduce((sum, entry) => sum + entry.clicks, 0), [props.worldMap]);
-
   return (
     <section className="rb-report-grid">
       <article className="rb-panel rb-overview-card">
@@ -425,22 +527,9 @@ function RebrandlyCharts(props: RebrandlyChartsProps) {
         </div>
       </article>
 
-      <article className="rb-panel rb-analytics-card">
+      <article className="rb-panel rb-analytics-card rb-geo-card">
         <h3>{copy.geoDistribution}</h3>
         <WorldHeatMap data={props.worldMap} lang={props.lang} />
-        <ul className="rb-geo-list">
-          {props.worldMap.slice(0, 6).map((entry) => {
-            const share = worldTotal > 0 ? Math.round((entry.clicks / worldTotal) * 100) : 0;
-            return (
-              <li key={entry.label}>
-                <span>{toCountryName(entry.label, props.lang)}</span>
-                <strong>
-                  {formatNumber(entry.clicks, props.lang)} ({share}%)
-                </strong>
-              </li>
-            );
-          })}
-        </ul>
       </article>
 
       <ListCard title={copy.topCities} data={props.topCities} lang={props.lang} />

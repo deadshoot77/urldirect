@@ -549,7 +549,8 @@ button:disabled {
   border-radius: 12px;
   background: #070b10;
   overflow: hidden;
-  min-height: 280px;
+  min-height: 360px;
+  position: relative;
 }
 
 .rb-world-map svg {
@@ -557,6 +558,89 @@ button:disabled {
   width: 100%;
   height: auto;
   aspect-ratio: 1000 / 470;
+}
+
+.rb-world-map-wrap {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.rb-map-tooltip {
+  position: absolute;
+  z-index: 10;
+  pointer-events: none;
+  min-width: 110px;
+  border: 1px solid #3f4a59;
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+  background: rgba(3, 8, 15, 0.95);
+  display: grid;
+  gap: 0.2rem;
+}
+
+.rb-map-tooltip strong {
+  font-size: 1.1rem;
+  color: #fff;
+  line-height: 1;
+}
+
+.rb-map-tooltip span {
+  font-size: 0.86rem;
+  color: #dbe3ef;
+}
+
+.rb-map-tooltip small {
+  font-size: 0.76rem;
+  color: #9bb1cc;
+}
+
+.rb-country-toggle {
+  justify-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: 0;
+  background: transparent;
+  color: #e7edf8;
+  font-weight: 600;
+  padding: 0.3rem 0.55rem;
+}
+
+.rb-country-toggle:hover {
+  background: rgba(24, 34, 49, 0.55);
+}
+
+.rb-country-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+}
+
+.rb-country-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.58rem 0.45rem;
+  border-bottom: 1px solid rgba(46, 58, 78, 0.8);
+}
+
+.rb-country-list li.active {
+  background: linear-gradient(90deg, rgba(27, 134, 199, 0.9) 0%, rgba(27, 134, 199, 0.9) 100%);
+}
+
+.rb-country-list li.active span,
+.rb-country-list li.active strong {
+  color: #f8fcff;
+}
+
+.rb-country-list strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.rb-geo-card {
+  grid-column: 1 / -1;
 }
 
 .rb-click-type-chart {
@@ -727,12 +811,89 @@ button:disabled {
 }
 
 .language-toggle {
-  border: 1px solid var(--border);
-  background: #1a2539;
+  position: relative;
 }
 
-.language-toggle span.active {
+.language-toggle-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid #cfd4da;
+  border-radius: 10px;
+  background: #2b2f46;
   color: #fff;
+  padding: 0.45rem 0.68rem;
+}
+
+.language-toggle-trigger:hover {
+  background: #343a56;
+}
+
+.language-toggle-trigger svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+
+.language-code {
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.language-name {
+  color: #f2f4f8;
+  font-weight: 600;
+}
+
+.language-toggle-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 40;
+  min-width: 220px;
+  border: 1px solid #586174;
+  border-radius: 12px;
+  background: #121b2d;
+  padding: 0.45rem;
+  box-shadow: 0 14px 24px rgba(0, 0, 0, 0.35);
+}
+
+.language-option {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.55rem;
+  border: 0;
+  border-radius: 9px;
+  padding: 0.55rem 0.6rem;
+  color: #dce6f6;
+  background: transparent;
+  text-align: left;
+}
+
+.language-option:hover {
+  background: #1e2941;
+}
+
+.language-option.active {
+  background: linear-gradient(135deg, #7e22ce, #db2777);
+  color: #fff;
+}
+
+.language-option-code {
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.language-option-name {
+  font-weight: 600;
+}
+
+.language-option-check {
+  font-weight: 700;
 }
 
 @media (max-width: 1160px) {
@@ -789,5 +950,13 @@ button:disabled {
 
   .rb-global-metrics {
     grid-template-columns: 1fr;
+  }
+
+  .rb-world-map {
+    min-height: 250px;
+  }
+
+  .language-toggle-menu {
+    min-width: 190px;
   }
 }
