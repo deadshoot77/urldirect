@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Bar, Doughnut, Line } from "react-chartjs-2";
 import { geoNaturalEarth1, geoPath } from "d3-geo";
 import countries from "i18n-iso-countries";
@@ -191,14 +191,29 @@ function toCountryAlpha2(label: string): string | null {
   return null;
 }
 
-function toCountryFlag(label: string): string {
-  const alpha2 = toCountryAlpha2(label);
-  if (!alpha2) return "🌐";
-  return alpha2
-    .toUpperCase()
-    .split("")
-    .map((char) => String.fromCodePoint(127397 + char.charCodeAt(0)))
-    .join("");
+function CountryFlag({ code }: { code: string | null }) {
+  const [failed, setFailed] = useState(false);
+  if (!code || failed) {
+    return (
+      <i className="rb-flag" aria-hidden="true">
+        🌐
+      </i>
+    );
+  }
+
+  return (
+    <img
+      src={`https://flagcdn.com/24x18/${code.toLowerCase()}.png`}
+      width={24}
+      height={18}
+      className="rb-flag-img"
+      alt=""
+      aria-hidden="true"
+      loading="lazy"
+      decoding="async"
+      onError={() => setFailed(true)}
+    />
+  );
 }
 
 function toCountryName(label: string, lang: AdminLang): string {
@@ -248,13 +263,15 @@ function WorldHeatMap({ data, lang }: { data: LabelCount[]; lang: AdminLang }) {
   const [features, setFeatures] = useState<WorldGeoFeature[]>(() => worldGeoFeaturesCache ?? []);
   const [showCountries, setShowCountries] = useState(false);
   const [hovered, setHovered] = useState<{
-    flag: string;
+    flagCode: string | null;
     name: string;
     share: number;
     clicks: number;
     x: number;
     y: number;
   } | null>(null);
+  const [tooltipVisible, setTooltipVisible] = useState(false);
+  const hideTooltipTimer = useRef<number | null>(null);
   const copy = rebrandlyWords[lang];
 
   useEffect(() => {
@@ -265,6 +282,15 @@ function WorldHeatMap({ data, lang }: { data: LabelCount[]; lang: AdminLang }) {
     });
     return () => {
       active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (hideTooltipTimer.current !== null) {
+        window.clearTimeout(hideTooltipTimer.current);
+        hideTooltipTimer.current = null;
+      }
     };
   }, []);
 
@@ -287,7 +313,7 @@ function WorldHeatMap({ data, lang }: { data: LabelCount[]; lang: AdminLang }) {
         clicks,
         share: totalClicks > 0 ? (clicks / totalClicks) * 100 : 0,
         name: toCountryName(code, lang),
-        flag: toCountryFlag(code)
+        flagCode: toCountryAlpha2(code)
       }))
       .sort((a, b) => b.clicks - a.clicks || a.name.localeCompare(b.name));
 
@@ -338,6 +364,11 @@ function WorldHeatMap({ data, lang }: { data: LabelCount[]; lang: AdminLang }) {
   }, [mapFeatures]);
 
   function onCountryHover(event: React.MouseEvent<SVGPathElement>, countryCode: string, clicks: number) {
+    if (hideTooltipTimer.current !== null) {
+      window.clearTimeout(hideTooltipTimer.current);
+      hideTooltipTimer.current = null;
+    }
+
     const svg = event.currentTarget.ownerSVGElement;
     if (!svg) return;
     const rect = svg.getBoundingClientRect();
@@ -345,13 +376,33 @@ function WorldHeatMap({ data, lang }: { data: LabelCount[]; lang: AdminLang }) {
     const y = Math.min(rect.height - 72, Math.max(12, event.clientY - rect.top - 8));
     const share = totalClicks > 0 ? (clicks / totalClicks) * 100 : 0;
     setHovered({
-      flag: toCountryFlag(countryCode),
+      flagCode: toCountryAlpha2(countryCode),
       name: toCountryName(countryCode, lang),
       share,
       clicks,
       x,
       y
     });
+    setTooltipVisible(true);
+  }
+
+  function hideTooltipSoon(delayMs: number) {
+    setTooltipVisible(false);
+    if (hideTooltipTimer.current !== null) {
+      window.clearTimeout(hideTooltipTimer.current);
+    }
+    hideTooltipTimer.current = window.setTimeout(() => {
+      setHovered(null);
+      hideTooltipTimer.current = null;
+    }, delayMs);
+  }
+
+  function onCountryLeave() {
+    hideTooltipSoon(120);
+  }
+
+  function onMapLeave() {
+    hideTooltipSoon(180);
   }
 
   return (
@@ -360,7 +411,7 @@ function WorldHeatMap({ data, lang }: { data: LabelCount[]; lang: AdminLang }) {
         {!pathGenerator ? (
           <p className="rb-muted">{copy.loadingMap}</p>
         ) : (
-          <svg viewBox="0 0 1200 500" aria-label={copy.geoDistribution}>
+          <svg viewBox="0 0 1200 500" aria-label={copy.geoDistribution} onMouseLeave={onMapLeave}>
             <rect x="0" y="0" width="1200" height="500" fill="#070b10" />
             {mapFeatures.map((feature, index) => {
               const iso3 = typeof feature.id === "string" ? feature.id.toUpperCase() : "";
@@ -374,26 +425,31 @@ function WorldHeatMap({ data, lang }: { data: LabelCount[]; lang: AdminLang }) {
                   fill={mapHeatColor(clicks, maxClicks)}
                   stroke="#5f6670"
                   strokeWidth={0.45}
+                  onMouseEnter={(event) => onCountryHover(event, iso3, clicks)}
                   onMouseMove={(event) => onCountryHover(event, iso3, clicks)}
-                  onMouseLeave={() => setHovered(null)}
+                  onMouseLeave={onCountryLeave}
                 />
               );
             })}
           </svg>
         )}
 
-        {hovered ? (
-          <div className="rb-map-tooltip" style={{ left: `${hovered.x}px`, top: `${hovered.y}px` }}>
-            <strong>{formatPercent(hovered.share, lang)}%</strong>
-            <span>
-              <i className="rb-flag" aria-hidden="true">
-                {hovered.flag}
-              </i>
-              {hovered.name}
-            </span>
-            <small>{formatNumber(hovered.clicks, lang)}</small>
-          </div>
-        ) : null}
+        <div
+          className={`rb-map-tooltip${tooltipVisible && hovered ? " is-visible" : ""}`}
+          style={{ left: `${hovered?.x ?? 0}px`, top: `${hovered?.y ?? 0}px` }}
+          aria-hidden={!tooltipVisible || !hovered}
+        >
+          {hovered ? (
+            <>
+              <strong>{formatPercent(hovered.share, lang)}%</strong>
+              <span>
+                <CountryFlag code={hovered.flagCode} />
+                {hovered.name}
+              </span>
+              <small>{formatNumber(hovered.clicks, lang)}</small>
+            </>
+          ) : null}
+        </div>
       </div>
 
       <button type="button" className="rb-country-toggle" onClick={() => setShowCountries((current) => !current)}>
@@ -404,18 +460,20 @@ function WorldHeatMap({ data, lang }: { data: LabelCount[]; lang: AdminLang }) {
       {showCountries ? (
         <ul className="rb-country-list">
           {countryRows.topCountries.map((country, index) => (
-            <li key={country.code} className={index === 0 ? "active" : ""}>
+            <li
+              key={country.code}
+              className={index === 0 ? "active" : ""}
+              style={{ animationDelay: `${index * 55}ms` }}
+            >
               <span>
-                <i className="rb-flag" aria-hidden="true">
-                  {country.flag}
-                </i>
+                <CountryFlag code={country.flagCode} />
                 {country.name}
               </span>
               <strong>{formatPercent(country.share, lang)}%</strong>
             </li>
           ))}
           {countryRows.otherClicks > 0 ? (
-            <li>
+            <li style={{ animationDelay: `${countryRows.topCountries.length * 55}ms` }}>
               <span>{copy.otherCountries}</span>
               <strong>{formatPercent(countryRows.otherShare, lang)}%</strong>
             </li>

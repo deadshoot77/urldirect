@@ -127,6 +127,35 @@ button:disabled {
   flex-wrap: wrap;
 }
 
+.rb-section-tabs {
+  width: fit-content;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #0f1726;
+  padding: 0.24rem;
+}
+
+.rb-section-tabs button {
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #d5deed;
+  font-weight: 700;
+  padding: 0.46rem 0.78rem;
+}
+
+.rb-section-tabs button:hover {
+  background: rgba(41, 56, 78, 0.65);
+}
+
+.rb-section-tabs button.active {
+  background: linear-gradient(135deg, #1b9fed 0%, #2179cc 100%);
+  color: #ffffff;
+}
+
 .rb-inline-control {
   display: inline-flex;
   align-items: center;
@@ -576,6 +605,47 @@ button:disabled {
   background: rgba(3, 8, 15, 0.95);
   display: grid;
   gap: 0.2rem;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(6px) scale(0.985);
+  transition:
+    opacity 140ms ease,
+    transform 180ms ease,
+    left 90ms ease-out,
+    top 90ms ease-out,
+    visibility 0s linear 180ms;
+}
+
+.rb-map-tooltip.is-visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0) scale(1);
+  transition:
+    opacity 140ms ease,
+    transform 180ms ease,
+    left 90ms ease-out,
+    top 90ms ease-out,
+    visibility 0s linear 0s;
+}
+
+.rb-map-tooltip::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  top: calc(50% - 6px);
+  border-style: solid;
+  border-width: 6px 7px 6px 0;
+  border-color: transparent #3f4a59 transparent transparent;
+}
+
+.rb-map-tooltip::after {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: calc(50% - 5px);
+  border-style: solid;
+  border-width: 5px 6px 5px 0;
+  border-color: transparent rgba(3, 8, 15, 0.95) transparent transparent;
 }
 
 .rb-map-tooltip strong {
@@ -627,6 +697,9 @@ button:disabled {
   gap: 0.6rem;
   padding: 0.58rem 0.45rem;
   border-bottom: 1px solid rgba(46, 58, 78, 0.8);
+  opacity: 0;
+  transform: translateX(-9px);
+  animation: rb-country-row-in 220ms ease-out forwards;
 }
 
 .rb-country-list li span {
@@ -635,12 +708,39 @@ button:disabled {
   gap: 0.35rem;
 }
 
+.rb-country-list li span::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 6px solid #6f7f95;
+  flex: 0 0 auto;
+}
+
 .rb-flag {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-style: normal;
-  font-size: 1rem;
+  font-size: 0.85rem;
   line-height: 1;
+  width: 24px;
+  height: 18px;
+  border-radius: 3px;
+  background: rgba(18, 28, 41, 0.8);
+  border: 1px solid rgba(62, 76, 97, 0.85);
   font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "Twemoji Mozilla", sans-serif;
+}
+
+.rb-flag-img {
+  width: 24px;
+  height: 18px;
+  object-fit: cover;
+  border-radius: 3px;
+  border: 1px solid rgba(62, 76, 97, 0.85);
+  background: rgba(18, 28, 41, 0.8);
+  flex: 0 0 auto;
 }
 
 .rb-country-list li.active {
@@ -652,8 +752,24 @@ button:disabled {
   color: #f8fcff;
 }
 
+.rb-country-list li.active span::before {
+  border-left-color: #f8fcff;
+}
+
 .rb-country-list strong {
   font-variant-numeric: tabular-nums;
+}
+
+@keyframes rb-country-row-in {
+  from {
+    opacity: 0;
+    transform: translateX(-9px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
 }
 
 .rb-geo-card {
@@ -913,6 +1029,18 @@ button:disabled {
 
 .language-option-check {
   font-weight: 700;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rb-country-list li {
+    opacity: 1;
+    transform: none;
+    animation: none;
+  }
+
+  .rb-map-tooltip {
+    transition: none;
+  }
 }
 
 @media (max-width: 1160px) {

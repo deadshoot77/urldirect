@@ -14,6 +14,7 @@ interface AdminLinksPageClientProps {
 }
 
 type ViewMode = "list" | "grid";
+type AdminSection = "links" | "analytics";
 
 interface NewLinkFormState {
   slug: string;
@@ -29,6 +30,9 @@ const words = {
     languageToggleAria: "Basculer la langue",
     logout: "Se deconnecter",
     signingOut: "Deconnexion...",
+    tabsAria: "Sections de la page",
+    linksTab: "Links",
+    analyticsTab: "Analytics",
     globalStatsTitle: "Statistiques globales (tous les liens)",
     totalLinks: "Liens actifs",
     totalClicks: "Clics totaux",
@@ -80,6 +84,9 @@ const words = {
     languageToggleAria: "Toggle language",
     logout: "Logout",
     signingOut: "Signing out...",
+    tabsAria: "Page sections",
+    linksTab: "Links",
+    analyticsTab: "Analytics",
     globalStatsTitle: "Global Stats (all links)",
     totalLinks: "Active links",
     totalClicks: "Total clicks",
@@ -199,6 +206,7 @@ export default function AdminLinksPageClient({ initialLinks, initialGlobalAnalyt
   } | null>(null);
   const [loadingLinkStatsId, setLoadingLinkStatsId] = useState<string | null>(null);
   const [lang, setLang] = useState<AdminLang>("fr");
+  const [activeSection, setActiveSection] = useState<AdminSection>("links");
   const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -381,273 +389,289 @@ export default function AdminLinksPageClient({ initialLinks, initialGlobalAnalyt
         </div>
       </header>
 
-      <section className="rb-panel">
-        <h2>{copy.globalStatsTitle}</h2>
-        <div className="rb-global-metrics">
-          {statsCards.map((item) => (
-            <article key={item.label}>
-              <span>{item.label}</span>
-              <strong>{formatNumber(item.value, lang)}</strong>
-            </article>
-          ))}
-        </div>
-        <AdminCharts
-          mode="rebrandly"
-          lang={lang}
-          overview={globalAnalytics.overview}
-          timeseries={globalAnalytics.timeseries}
-          worldMap={globalAnalytics.worldMap}
-          topCities={globalAnalytics.topCities}
-          topRegions={globalAnalytics.topRegions}
-          topDays={globalAnalytics.topDays}
-          popularHours={globalAnalytics.popularHours}
-          clickType={globalAnalytics.clickType}
-          topSocialPlatforms={globalAnalytics.topSocialPlatforms}
-          topSources={globalAnalytics.topSources}
-          topBrowsers={globalAnalytics.topBrowsers}
-          topDevices={globalAnalytics.topDevices}
-          topLanguages={globalAnalytics.topLanguages}
-          topPlatforms={globalAnalytics.topPlatforms}
-        />
-        <div className="rb-report-grid rb-global-lists">
-          <StatsList title={copy.topLinks} items={globalAnalytics.topLinks} lang={lang} />
-        </div>
-      </section>
-
-      <section className="rb-toolbar">
-        <div className="rb-toolbar-left">
-          <label htmlFor="sort_select">
-            {copy.sort}
-            <select id="sort_select" defaultValue="latest">
-              <option value="latest">{copy.latest}</option>
-              <option value="oldest">{copy.oldest}</option>
-              <option value="clicks">{copy.mostClicks}</option>
-            </select>
-          </label>
-        </div>
-        <div className="rb-toolbar-right">
-          <div className="rb-view-toggle">
-            <button type="button" className={viewMode === "list" ? "active" : ""} onClick={() => setViewMode("list")}>
-              {copy.list}
-            </button>
-            <button type="button" className={viewMode === "grid" ? "active" : ""} onClick={() => setViewMode("grid")}>
-              {copy.grid}
-            </button>
-          </div>
-          <button type="button" className="rb-primary" onClick={() => setShowNewLinkForm((value) => !value)}>
-            {copy.newLink}
-          </button>
-        </div>
-      </section>
-
-      {showNewLinkForm ? (
-        <section className="rb-panel">
-          <h2>{copy.createTitle}</h2>
-          <div className="rb-form-grid">
-            <label htmlFor="new_slug">
-              {copy.slug}
-              <input
-                id="new_slug"
-                value={form.slug}
-                onChange={(event) => setForm((prev) => ({ ...prev, slug: event.target.value }))}
-                placeholder="offer-2026"
-              />
-            </label>
-            <label htmlFor="new_destination">
-              {copy.destinationUrl}
-              <input
-                id="new_destination"
-                type="url"
-                value={form.destination_url}
-                onChange={(event) => setForm((prev) => ({ ...prev, destination_url: event.target.value }))}
-                placeholder="https://example.com/landing"
-              />
-            </label>
-            <label htmlFor="new_tags">
-              {copy.tags}
-              <input
-                id="new_tags"
-                value={form.tags}
-                onChange={(event) => setForm((prev) => ({ ...prev, tags: event.target.value }))}
-                placeholder="campaign,spring"
-              />
-            </label>
-            <label htmlFor="new_redirect_type">
-              {copy.redirectType}
-              <select
-                id="new_redirect_type"
-                value={form.redirect_type}
-                onChange={(event) =>
-                  setForm((prev) => ({
-                    ...prev,
-                    redirect_type: Number(event.target.value) as 301 | 302
-                  }))
-                }
-              >
-                <option value={302}>302</option>
-                <option value={301}>301</option>
-              </select>
-            </label>
-          </div>
-          <div className="rb-form-actions">
-            <button type="button" className="rb-primary" disabled={creating} onClick={() => void submitNewLink()}>
-              {creating ? copy.creating : copy.createLink}
-            </button>
-            <button type="button" onClick={() => setShowNewLinkForm(false)}>
-              {copy.cancel}
-            </button>
-          </div>
-        </section>
-      ) : null}
-
-      {feedback ? <p className="rb-feedback">{feedback}</p> : null}
-
-      {loading ? <p className="rb-feedback">{copy.refreshLinks}</p> : null}
-
-      {viewMode === "list" ? (
-        <section className="rb-panel">
-          <table className="rb-table">
-            <thead>
-              <tr>
-                <th>{copy.tableLinkTitle}</th>
-                <th>{copy.tableDestinationUrl}</th>
-                <th>{copy.tableClicksReceived}</th>
-                <th>{copy.tableCreationDate}</th>
-                <th>{copy.tableActions}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {links.items.length === 0 ? (
-                <tr>
-                  <td colSpan={5}>{copy.noLinksYet}</td>
-                </tr>
-              ) : (
-                links.items.map((link) => (
-                  <tr key={link.id}>
-                    <td>
-                      <Link href={`/admin/links/${link.id}`} className="rb-link-title">
-                        /{link.slug}
-                      </Link>
-                      {link.tags.length > 0 ? (
-                        <div className="rb-tags">
-                          {link.tags.map((tag) => (
-                            <span key={tag} className="rb-tag">
-                              {tag}
-                            </span>
-                          ))}
-                        </div>
-                      ) : null}
-                    </td>
-                    <td className="rb-cell-url">{link.destinationUrl}</td>
-                    <td>{formatNumber(link.clicksReceived, lang)}</td>
-                    <td>{formatDate(link.createdAt, lang)}</td>
-                    <td>
-                      <div className="rb-actions">
-                        <button type="button" onClick={() => void copyLink(link.slug)}>
-                          {copy.copy}
-                        </button>
-                        <button type="button" onClick={() => void toggleLinkStats(link.id, link.slug)}>
-                          {activeLinkStats?.id === link.id ? copy.hideStats : copy.showStats}
-                        </button>
-                        <button type="button" onClick={() => void toggleFavorite(link.id, link.isFavorite)}>
-                          {link.isFavorite ? "★" : "☆"}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </section>
-      ) : (
-        <section className="rb-grid">
-          {links.items.map((link) => (
-            <article key={link.id} className="rb-card">
-              <div className="rb-card-head">
-                <Link href={`/admin/links/${link.id}`} className="rb-link-title">
-                  /{link.slug}
-                </Link>
-                <button type="button" onClick={() => void toggleFavorite(link.id, link.isFavorite)}>
-                  {link.isFavorite ? "★" : "☆"}
-                </button>
-              </div>
-              <p className="rb-card-url">{link.destinationUrl}</p>
-              <p className="rb-card-meta">
-                {formatNumber(link.clicksReceived, lang)} {copy.clicks}
-              </p>
-              {link.tags.length > 0 ? (
-                <div className="rb-tags">
-                  {link.tags.map((tag) => (
-                    <span key={tag} className="rb-tag">
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
-              <div className="rb-actions">
-                <button type="button" onClick={() => void copyLink(link.slug)}>
-                  {copy.copy}
-                </button>
-                <button type="button" onClick={() => void toggleLinkStats(link.id, link.slug)}>
-                  {activeLinkStats?.id === link.id ? copy.hideStats : copy.showStats}
-                </button>
-                <Link href={`/admin/links/${link.id}`} className="rb-button-link">
-                  {copy.open}
-                </Link>
-              </div>
-            </article>
-          ))}
-        </section>
-      )}
-
-      {activeLinkStats ? (
-        <section className="rb-panel rb-link-inline-stats">
-          <h2>
-            {copy.linkStatsTitle} /{activeLinkStats.slug}
-          </h2>
-          {loadingLinkStatsId === activeLinkStats.id ? (
-            <p className="rb-muted">{copy.loadingStats}</p>
-          ) : activeLinkAnalytics ? (
-            <AdminCharts
-              mode="rebrandly"
-              lang={lang}
-              overview={activeLinkAnalytics.overview}
-              timeseries={activeLinkAnalytics.timeseries}
-              worldMap={activeLinkAnalytics.worldMap}
-              topCities={activeLinkAnalytics.topCities}
-              topRegions={activeLinkAnalytics.topRegions}
-              topDays={activeLinkAnalytics.topDays}
-              popularHours={activeLinkAnalytics.popularHours}
-              clickType={activeLinkAnalytics.clickType}
-              topSocialPlatforms={activeLinkAnalytics.topSocialPlatforms}
-              topSources={activeLinkAnalytics.topSources}
-              topBrowsers={activeLinkAnalytics.topBrowsers}
-              topDevices={activeLinkAnalytics.topDevices}
-              topLanguages={activeLinkAnalytics.topLanguages}
-              topPlatforms={activeLinkAnalytics.topPlatforms}
-            />
-          ) : (
-            <p className="rb-muted">{copy.noData}</p>
-          )}
-        </section>
-      ) : null}
-
-      <footer className="rb-pagination">
-        <button type="button" disabled={links.page <= 1 || loading} onClick={() => void refresh(links.page - 1)}>
-          {copy.previous}
+      <nav className="rb-section-tabs" aria-label={copy.tabsAria}>
+        <button type="button" className={activeSection === "links" ? "active" : ""} onClick={() => setActiveSection("links")}>
+          {copy.linksTab}
         </button>
-        <span>
-          {copy.page} {links.page} / {links.totalPages}
-        </span>
         <button
           type="button"
-          disabled={links.page >= links.totalPages || loading}
-          onClick={() => void refresh(links.page + 1)}
+          className={activeSection === "analytics" ? "active" : ""}
+          onClick={() => setActiveSection("analytics")}
         >
-          {copy.next}
+          {copy.analyticsTab}
         </button>
-      </footer>
+      </nav>
+
+      {feedback ? <p className="rb-feedback">{feedback}</p> : null}
+      {loading ? <p className="rb-feedback">{copy.refreshLinks}</p> : null}
+
+      {activeSection === "analytics" ? (
+        <section className="rb-panel">
+          <h2>{copy.globalStatsTitle}</h2>
+          <div className="rb-global-metrics">
+            {statsCards.map((item) => (
+              <article key={item.label}>
+                <span>{item.label}</span>
+                <strong>{formatNumber(item.value, lang)}</strong>
+              </article>
+            ))}
+          </div>
+          <AdminCharts
+            mode="rebrandly"
+            lang={lang}
+            overview={globalAnalytics.overview}
+            timeseries={globalAnalytics.timeseries}
+            worldMap={globalAnalytics.worldMap}
+            topCities={globalAnalytics.topCities}
+            topRegions={globalAnalytics.topRegions}
+            topDays={globalAnalytics.topDays}
+            popularHours={globalAnalytics.popularHours}
+            clickType={globalAnalytics.clickType}
+            topSocialPlatforms={globalAnalytics.topSocialPlatforms}
+            topSources={globalAnalytics.topSources}
+            topBrowsers={globalAnalytics.topBrowsers}
+            topDevices={globalAnalytics.topDevices}
+            topLanguages={globalAnalytics.topLanguages}
+            topPlatforms={globalAnalytics.topPlatforms}
+          />
+          <div className="rb-report-grid rb-global-lists">
+            <StatsList title={copy.topLinks} items={globalAnalytics.topLinks} lang={lang} />
+          </div>
+        </section>
+      ) : (
+        <>
+          <section className="rb-toolbar">
+            <div className="rb-toolbar-left">
+              <label htmlFor="sort_select">
+                {copy.sort}
+                <select id="sort_select" defaultValue="latest">
+                  <option value="latest">{copy.latest}</option>
+                  <option value="oldest">{copy.oldest}</option>
+                  <option value="clicks">{copy.mostClicks}</option>
+                </select>
+              </label>
+            </div>
+            <div className="rb-toolbar-right">
+              <div className="rb-view-toggle">
+                <button type="button" className={viewMode === "list" ? "active" : ""} onClick={() => setViewMode("list")}>
+                  {copy.list}
+                </button>
+                <button type="button" className={viewMode === "grid" ? "active" : ""} onClick={() => setViewMode("grid")}>
+                  {copy.grid}
+                </button>
+              </div>
+              <button type="button" className="rb-primary" onClick={() => setShowNewLinkForm((value) => !value)}>
+                {copy.newLink}
+              </button>
+            </div>
+          </section>
+
+          {showNewLinkForm ? (
+            <section className="rb-panel">
+              <h2>{copy.createTitle}</h2>
+              <div className="rb-form-grid">
+                <label htmlFor="new_slug">
+                  {copy.slug}
+                  <input
+                    id="new_slug"
+                    value={form.slug}
+                    onChange={(event) => setForm((prev) => ({ ...prev, slug: event.target.value }))}
+                    placeholder="offer-2026"
+                  />
+                </label>
+                <label htmlFor="new_destination">
+                  {copy.destinationUrl}
+                  <input
+                    id="new_destination"
+                    type="url"
+                    value={form.destination_url}
+                    onChange={(event) => setForm((prev) => ({ ...prev, destination_url: event.target.value }))}
+                    placeholder="https://example.com/landing"
+                  />
+                </label>
+                <label htmlFor="new_tags">
+                  {copy.tags}
+                  <input
+                    id="new_tags"
+                    value={form.tags}
+                    onChange={(event) => setForm((prev) => ({ ...prev, tags: event.target.value }))}
+                    placeholder="campaign,spring"
+                  />
+                </label>
+                <label htmlFor="new_redirect_type">
+                  {copy.redirectType}
+                  <select
+                    id="new_redirect_type"
+                    value={form.redirect_type}
+                    onChange={(event) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        redirect_type: Number(event.target.value) as 301 | 302
+                      }))
+                    }
+                  >
+                    <option value={302}>302</option>
+                    <option value={301}>301</option>
+                  </select>
+                </label>
+              </div>
+              <div className="rb-form-actions">
+                <button type="button" className="rb-primary" disabled={creating} onClick={() => void submitNewLink()}>
+                  {creating ? copy.creating : copy.createLink}
+                </button>
+                <button type="button" onClick={() => setShowNewLinkForm(false)}>
+                  {copy.cancel}
+                </button>
+              </div>
+            </section>
+          ) : null}
+
+          {viewMode === "list" ? (
+            <section className="rb-panel">
+              <table className="rb-table">
+                <thead>
+                  <tr>
+                    <th>{copy.tableLinkTitle}</th>
+                    <th>{copy.tableDestinationUrl}</th>
+                    <th>{copy.tableClicksReceived}</th>
+                    <th>{copy.tableCreationDate}</th>
+                    <th>{copy.tableActions}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {links.items.length === 0 ? (
+                    <tr>
+                      <td colSpan={5}>{copy.noLinksYet}</td>
+                    </tr>
+                  ) : (
+                    links.items.map((link) => (
+                      <tr key={link.id}>
+                        <td>
+                          <Link href={`/admin/links/${link.id}`} className="rb-link-title">
+                            /{link.slug}
+                          </Link>
+                          {link.tags.length > 0 ? (
+                            <div className="rb-tags">
+                              {link.tags.map((tag) => (
+                                <span key={tag} className="rb-tag">
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                        </td>
+                        <td className="rb-cell-url">{link.destinationUrl}</td>
+                        <td>{formatNumber(link.clicksReceived, lang)}</td>
+                        <td>{formatDate(link.createdAt, lang)}</td>
+                        <td>
+                          <div className="rb-actions">
+                            <button type="button" onClick={() => void copyLink(link.slug)}>
+                              {copy.copy}
+                            </button>
+                            <button type="button" onClick={() => void toggleLinkStats(link.id, link.slug)}>
+                              {activeLinkStats?.id === link.id ? copy.hideStats : copy.showStats}
+                            </button>
+                            <button type="button" onClick={() => void toggleFavorite(link.id, link.isFavorite)}>
+                              {link.isFavorite ? "★" : "☆"}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </section>
+          ) : (
+            <section className="rb-grid">
+              {links.items.map((link) => (
+                <article key={link.id} className="rb-card">
+                  <div className="rb-card-head">
+                    <Link href={`/admin/links/${link.id}`} className="rb-link-title">
+                      /{link.slug}
+                    </Link>
+                    <button type="button" onClick={() => void toggleFavorite(link.id, link.isFavorite)}>
+                      {link.isFavorite ? "★" : "☆"}
+                    </button>
+                  </div>
+                  <p className="rb-card-url">{link.destinationUrl}</p>
+                  <p className="rb-card-meta">
+                    {formatNumber(link.clicksReceived, lang)} {copy.clicks}
+                  </p>
+                  {link.tags.length > 0 ? (
+                    <div className="rb-tags">
+                      {link.tags.map((tag) => (
+                        <span key={tag} className="rb-tag">
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="rb-actions">
+                    <button type="button" onClick={() => void copyLink(link.slug)}>
+                      {copy.copy}
+                    </button>
+                    <button type="button" onClick={() => void toggleLinkStats(link.id, link.slug)}>
+                      {activeLinkStats?.id === link.id ? copy.hideStats : copy.showStats}
+                    </button>
+                    <Link href={`/admin/links/${link.id}`} className="rb-button-link">
+                      {copy.open}
+                    </Link>
+                  </div>
+                </article>
+              ))}
+            </section>
+          )}
+
+          {activeLinkStats ? (
+            <section className="rb-panel rb-link-inline-stats">
+              <h2>
+                {copy.linkStatsTitle} /{activeLinkStats.slug}
+              </h2>
+              {loadingLinkStatsId === activeLinkStats.id ? (
+                <p className="rb-muted">{copy.loadingStats}</p>
+              ) : activeLinkAnalytics ? (
+                <AdminCharts
+                  mode="rebrandly"
+                  lang={lang}
+                  overview={activeLinkAnalytics.overview}
+                  timeseries={activeLinkAnalytics.timeseries}
+                  worldMap={activeLinkAnalytics.worldMap}
+                  topCities={activeLinkAnalytics.topCities}
+                  topRegions={activeLinkAnalytics.topRegions}
+                  topDays={activeLinkAnalytics.topDays}
+                  popularHours={activeLinkAnalytics.popularHours}
+                  clickType={activeLinkAnalytics.clickType}
+                  topSocialPlatforms={activeLinkAnalytics.topSocialPlatforms}
+                  topSources={activeLinkAnalytics.topSources}
+                  topBrowsers={activeLinkAnalytics.topBrowsers}
+                  topDevices={activeLinkAnalytics.topDevices}
+                  topLanguages={activeLinkAnalytics.topLanguages}
+                  topPlatforms={activeLinkAnalytics.topPlatforms}
+                />
+              ) : (
+                <p className="rb-muted">{copy.noData}</p>
+              )}
+            </section>
+          ) : null}
+
+          <footer className="rb-pagination">
+            <button type="button" disabled={links.page <= 1 || loading} onClick={() => void refresh(links.page - 1)}>
+              {copy.previous}
+            </button>
+            <span>
+              {copy.page} {links.page} / {links.totalPages}
+            </span>
+            <button
+              type="button"
+              disabled={links.page >= links.totalPages || loading}
+              onClick={() => void refresh(links.page + 1)}
+            >
+              {copy.next}
+            </button>
+          </footer>
+        </>
+      )}
     </main>
   );
 }
