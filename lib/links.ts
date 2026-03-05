@@ -134,6 +134,62 @@ export interface GlobalAnalyticsData extends LinkAnalyticsData {
   topLinks: LabelCount[];
 }
 
+export function createEmptyGlobalAnalyticsData(totalLinks = 0): GlobalAnalyticsData {
+  const topDays: LabelCount[] = DAY_LABELS.map((label) => ({
+    label,
+    clicks: 0
+  }));
+  const popularHours: LabelCount[] = Array.from({ length: 24 }, (_, hour) => ({
+    label: `${formatTwoDigits(hour)}:00`,
+    clicks: 0
+  }));
+
+  return {
+    totalLinks: Math.max(0, Math.floor(totalLinks)),
+    clicksLast7Days: 0,
+    topLinks: [],
+    overview: {
+      totalClicks: 0,
+      qrScans: 0,
+      clicksToday: 0,
+      lastClickAt: null,
+      uniqueClicks: 0,
+      nonUniqueClicks: 0,
+      visits: 0,
+      landingViews: 0,
+      humanClicks: 0,
+      redirects: 0,
+      directRedirects: 0,
+      botHits: 0,
+      prefetchHits: 0
+    },
+    timeseries: {
+      hours: [],
+      days: [],
+      months: []
+    },
+    worldMap: [],
+    topCities: [],
+    topRegions: [],
+    topDays,
+    popularHours,
+    clickType: [
+      { label: "Visits", clicks: 0 },
+      { label: "Landing Views", clicks: 0 },
+      { label: "Human Clicks", clicks: 0 },
+      { label: "Redirects (human)", clicks: 0 },
+      { label: "Bots", clicks: 0 },
+      { label: "Prefetch", clicks: 0 }
+    ],
+    topSocialPlatforms: [],
+    topSources: [],
+    topBrowsers: [],
+    topDevices: [],
+    topLanguages: [],
+    topPlatforms: []
+  };
+}
+
 export interface CreateShortLinkInput {
   slug: string;
   destinationUrl: string;

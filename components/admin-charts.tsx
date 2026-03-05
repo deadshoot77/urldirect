@@ -166,7 +166,8 @@ function formatLastClick(value: string | null, lang: AdminLang): string {
     month: "short",
     day: "numeric",
     hour: "2-digit",
-    minute: "2-digit"
+    minute: "2-digit",
+    timeZone: "UTC"
   });
 }
 

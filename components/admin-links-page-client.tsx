@@ -13,6 +13,7 @@ import type { AdminSettings } from "@/lib/types";
 interface AdminLinksPageClientProps {
   initialLinks: PaginatedShortLinks;
   initialGlobalAnalytics: GlobalAnalyticsData;
+  initialGlobalAnalyticsLoaded: boolean;
   initialSettings: AdminSettings;
 }
 
@@ -59,6 +60,8 @@ const words = {
     botHits: "Bots",
     prefetchHits: "Prefetch",
     noData: "Pas de donnees",
+    loadingAnalytics: "Chargement analytics...",
+    loadingTitle: "Chargement",
     sort: "Trier",
     latest: "Recents",
     oldest: "Anciens",
@@ -134,6 +137,8 @@ const words = {
     botHits: "Bots",
     prefetchHits: "Prefetch",
     noData: "No data",
+    loadingAnalytics: "Loading analytics...",
+    loadingTitle: "Loading",
     sort: "Sort",
     latest: "Latest",
     oldest: "Oldest",
@@ -205,7 +210,8 @@ function formatDate(value: string | null, lang: AdminLang): string {
   return date.toLocaleString(lang === "fr" ? "fr-FR" : "en-US", {
     year: "numeric",
     month: "short",
-    day: "numeric"
+    day: "numeric",
+    timeZone: "UTC"
   });
 }
 
@@ -244,10 +250,12 @@ function StatsList({
 export default function AdminLinksPageClient({
   initialLinks,
   initialGlobalAnalytics,
+  initialGlobalAnalyticsLoaded,
   initialSettings
 }: AdminLinksPageClientProps) {
   const [links, setLinks] = useState<PaginatedShortLinks>(initialLinks);
   const [globalAnalytics, setGlobalAnalytics] = useState<GlobalAnalyticsData>(initialGlobalAnalytics);
+  const [globalAnalyticsLoaded, setGlobalAnalyticsLoaded] = useState(initialGlobalAnalyticsLoaded);
   const [settings, setSettings] = useState<AdminSettings>(initialSettings);
   const [linkAnalytics, setLinkAnalytics] = useState<Record<string, LinkAnalyticsData>>({});
   const [activeLinkStats, setActiveLinkStats] = useState<{
@@ -267,6 +275,7 @@ export default function AdminLinksPageClient({
   const [savingSettings, setSavingSettings] = useState(false);
   const [deletingLinkId, setDeletingLinkId] = useState<string | null>(null);
   const [globalBackgroundUrl, setGlobalBackgroundUrl] = useState(initialSettings.globalBackgroundUrl ?? "");
+  const [loadingDots, setLoadingDots] = useState("");
 
   useEffect(() => {
     setOrigin(window.location.origin);
@@ -277,6 +286,27 @@ export default function AdminLinksPageClient({
   useEffect(() => {
     setGlobalBackgroundUrl(settings.globalBackgroundUrl ?? "");
   }, [settings.globalBackgroundUrl]);
+
+  useEffect(() => {
+    if (activeSection !== "analytics" || globalAnalyticsLoaded) {
+      return;
+    }
+    void refresh(links.page, { includeAnalytics: true });
+  }, [activeSection]);
+
+  useEffect(() => {
+    if (activeSection !== "analytics" || globalAnalyticsLoaded) {
+      setLoadingDots("");
+      return;
+    }
+    const sequence = ["", ".", "..", "..."];
+    let index = 0;
+    const timer = window.setInterval(() => {
+      index = (index + 1) % sequence.length;
+      setLoadingDots(sequence[index]);
+    }, 320);
+    return () => window.clearInterval(timer);
+  }, [activeSection, globalAnalyticsLoaded]);
 
   const copy = words[lang];
 
@@ -347,13 +377,17 @@ export default function AdminLinksPageClient({
     window.localStorage.setItem(ADMIN_LANG_STORAGE_KEY, nextLang);
   }
 
-  async function refresh(nextPage = links.page) {
+  async function refresh(nextPage = links.page, options?: { includeAnalytics?: boolean }) {
+    const includeAnalytics = options?.includeAnalytics ?? false;
     setLoading(true);
     try {
-      const response = await fetch(`/api/admin/links?page=${nextPage}&pageSize=${links.pageSize}`, {
+      const response = await fetch(
+        `/api/admin/links?page=${nextPage}&pageSize=${links.pageSize}&includeAnalytics=${includeAnalytics ? "1" : "0"}`,
+        {
         cache: "no-store",
         credentials: "include"
-      });
+        }
+      );
       const payload = (await response.json().catch(() => null)) as
         | {
             links?: PaginatedShortLinks;
@@ -363,13 +397,16 @@ export default function AdminLinksPageClient({
           }
         | null;
 
-      if (!response.ok || !payload?.links || !payload?.globalAnalytics || !payload?.settings) {
+      if (!response.ok || !payload?.links || !payload?.settings || (includeAnalytics && !payload?.globalAnalytics)) {
         throw new Error(toErrorMessage(payload, "Failed to refresh links"));
       }
 
       setLinks(payload.links);
-      setGlobalAnalytics(payload.globalAnalytics);
       setSettings(payload.settings);
+      if (payload.globalAnalytics) {
+        setGlobalAnalytics(payload.globalAnalytics);
+        setGlobalAnalyticsLoaded(true);
+      }
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Failed to refresh links", "error");
     } finally {
@@ -443,7 +480,7 @@ export default function AdminLinksPageClient({
 
       setForm(createDefaultFormState());
       setShowNewLinkForm(false);
-      await refresh(1);
+      await refresh(1, { includeAnalytics: false });
       showToast(copy.saved, "success");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Failed to create link", "error");
@@ -468,7 +505,7 @@ export default function AdminLinksPageClient({
       if (!response.ok) {
         throw new Error(toErrorMessage(payload, "Failed to update favorite"));
       }
-      await refresh(links.page);
+      await refresh(links.page, { includeAnalytics: false });
       showToast(copy.saved, "success");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Failed to update favorite", "error");
@@ -543,7 +580,7 @@ export default function AdminLinksPageClient({
         delete next[linkId];
         return next;
       });
-      await refresh(links.page);
+      await refresh(links.page, { includeAnalytics: false });
       showToast(copy.deletedLink, "success");
     } catch (error) {
       showToast(error instanceof Error ? error.message : copy.failedDelete, "error");
@@ -579,97 +616,114 @@ export default function AdminLinksPageClient({
         </button>
       </nav>
 
-      {loading ? <p className="rb-feedback">{copy.refreshLinks}</p> : null}
+      {loading && !(activeSection === "analytics" && !globalAnalyticsLoaded) ? <p className="rb-feedback">{copy.refreshLinks}</p> : null}
       {!settings.trackingEnabled ? <p className="rb-feedback">{copy.trackingDisabledHint}</p> : null}
-      {settings.trackingEnabled && totalTrackedEvents === 0 ? <p className="rb-feedback">{copy.zeroStatsHint}</p> : null}
+      {settings.trackingEnabled && globalAnalyticsLoaded && totalTrackedEvents === 0 ? (
+        <p className="rb-feedback">{copy.zeroStatsHint}</p>
+      ) : null}
 
       {activeSection === "analytics" ? (
-        <section className="rb-panel">
-          <h2>{copy.globalStatsTitle}</h2>
-          <article className="rb-panel">
-            <h3>{copy.trackingSettings}</h3>
-            <div className="rb-form-grid">
-              <label className="inline-checkbox">
-                <input
-                  type="checkbox"
-                  checked={settings.trackingEnabled}
-                  onChange={(event) =>
-                    setSettings((current) => ({
-                      ...current,
-                      trackingEnabled: event.target.checked
-                    }))
-                  }
-                />
-                <span>{copy.trackingEnabled}</span>
-              </label>
-              <label className="inline-checkbox">
-                <input
-                  type="checkbox"
-                  checked={settings.landingEnabled}
-                  onChange={(event) =>
-                    setSettings((current) => ({
-                      ...current,
-                      landingEnabled: event.target.checked
-                    }))
-                  }
-                />
-                <span>{copy.landingEnabled}</span>
-              </label>
-              <label htmlFor="global_background_url">
-                {copy.globalBackground}
-                <input
-                  id="global_background_url"
-                  type="url"
-                  value={globalBackgroundUrl}
-                  placeholder="https://..."
-                  onChange={(event) => setGlobalBackgroundUrl(event.target.value)}
-                />
-              </label>
+        !globalAnalyticsLoaded ? (
+          <section className="rb-panel rb-analytics-loading-screen" aria-live="polite" aria-busy="true">
+            <div className="rb-analytics-loader">
+              <div className="rb-loader-ring" aria-hidden="true" />
+              <p className="rb-loader-title">
+                {copy.loadingTitle}
+                {loadingDots}
+              </p>
+              <div className="rb-loader-progress" role="progressbar" aria-label={copy.loadingAnalytics}>
+                <span />
+              </div>
             </div>
-            <div className="rb-actions">
-              <button type="button" className="rb-primary" disabled={savingSettings} onClick={() => void saveSettings()}>
-                {savingSettings ? copy.savingSettings : copy.saveSettings}
-              </button>
+          </section>
+        ) : (
+          <section className="rb-panel">
+            <h2>{copy.globalStatsTitle}</h2>
+            <article className="rb-panel">
+              <h3>{copy.trackingSettings}</h3>
+              <div className="rb-form-grid">
+                <label className="inline-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={settings.trackingEnabled}
+                    onChange={(event) =>
+                      setSettings((current) => ({
+                        ...current,
+                        trackingEnabled: event.target.checked
+                      }))
+                    }
+                  />
+                  <span>{copy.trackingEnabled}</span>
+                </label>
+                <label className="inline-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={settings.landingEnabled}
+                    onChange={(event) =>
+                      setSettings((current) => ({
+                        ...current,
+                        landingEnabled: event.target.checked
+                      }))
+                    }
+                  />
+                  <span>{copy.landingEnabled}</span>
+                </label>
+                <label htmlFor="global_background_url">
+                  {copy.globalBackground}
+                  <input
+                    id="global_background_url"
+                    type="url"
+                    value={globalBackgroundUrl}
+                    placeholder="https://..."
+                    onChange={(event) => setGlobalBackgroundUrl(event.target.value)}
+                  />
+                </label>
+              </div>
+              <div className="rb-actions">
+                <button type="button" className="rb-primary" disabled={savingSettings} onClick={() => void saveSettings()}>
+                  {savingSettings ? copy.savingSettings : copy.saveSettings}
+                </button>
+              </div>
+            </article>
+            <div className="rb-global-metrics">
+              {statsCards.map((item) => (
+                <article key={item.label}>
+                  <span>{item.label}</span>
+                  <strong>{formatNumber(item.value, lang)}</strong>
+                </article>
+              ))}
             </div>
-          </article>
-          <div className="rb-global-metrics">
-            {statsCards.map((item) => (
-              <article key={item.label}>
-                <span>{item.label}</span>
-                <strong>{formatNumber(item.value, lang)}</strong>
-              </article>
-            ))}
-          </div>
-          <div className="rb-global-metrics">
-            {funnelCards.map((item) => (
-              <article key={item.label}>
-                <span>{item.label}</span>
-                <strong>{formatNumber(item.value, lang)}</strong>
-              </article>
-            ))}
-          </div>
-          <AdminCharts
-            mode="rebrandly"
-            lang={lang}
-            overview={globalAnalytics.overview}
-            timeseries={globalAnalytics.timeseries}
-            worldMap={globalAnalytics.worldMap}
-            topCities={globalAnalytics.topCities}
-            topRegions={globalAnalytics.topRegions}
-            topDays={globalAnalytics.topDays}
-            popularHours={globalAnalytics.popularHours}
-            clickType={globalAnalytics.clickType}
-            topSocialPlatforms={globalAnalytics.topSocialPlatforms}
-            topSources={globalAnalytics.topSources}
-            topBrowsers={globalAnalytics.topBrowsers}
-            topDevices={globalAnalytics.topDevices}
-            topLanguages={globalAnalytics.topLanguages}
-            topPlatforms={globalAnalytics.topPlatforms}
-          />
-          <div className="rb-report-grid rb-global-lists">
-            <StatsList title={copy.topLinks} items={globalAnalytics.topLinks} lang={lang} />
-          </div>
-        </section>
+            <div className="rb-global-metrics">
+              {funnelCards.map((item) => (
+                <article key={item.label}>
+                  <span>{item.label}</span>
+                  <strong>{formatNumber(item.value, lang)}</strong>
+                </article>
+              ))}
+            </div>
+            <AdminCharts
+              mode="rebrandly"
+              lang={lang}
+              overview={globalAnalytics.overview}
+              timeseries={globalAnalytics.timeseries}
+              worldMap={globalAnalytics.worldMap}
+              topCities={globalAnalytics.topCities}
+              topRegions={globalAnalytics.topRegions}
+              topDays={globalAnalytics.topDays}
+              popularHours={globalAnalytics.popularHours}
+              clickType={globalAnalytics.clickType}
+              topSocialPlatforms={globalAnalytics.topSocialPlatforms}
+              topSources={globalAnalytics.topSources}
+              topBrowsers={globalAnalytics.topBrowsers}
+              topDevices={globalAnalytics.topDevices}
+              topLanguages={globalAnalytics.topLanguages}
+              topPlatforms={globalAnalytics.topPlatforms}
+            />
+            <div className="rb-report-grid rb-global-lists">
+              <StatsList title={copy.topLinks} items={globalAnalytics.topLinks} lang={lang} />
+            </div>
+          </section>
+        )
       ) : (
         <>
           <section className="rb-toolbar">
