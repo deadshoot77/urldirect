@@ -3,6 +3,9 @@ export type DeviceType = "mobile" | "desktop" | "bot" | "unknown";
 export type PixelType = "meta" | "tiktok" | "google" | "postback";
 export type AdminPlan = "free" | "pro";
 export type TrackingLimitBehavior = "drop" | "minimal";
+export type LandingMode = "inherit" | "on" | "off";
+export type TrackingEventType = "visit" | "landing_view" | "human_click" | "redirect";
+export type TrafficCategory = "human" | "bot" | "prefetch" | "unknown";
 export type AnalyticsGranularity = "hours" | "days" | "months";
 export type JsonValue =
   | string
@@ -95,6 +98,8 @@ export interface ShortLink {
   routingRules: RoutingRule[];
   deepLinks: DeepLinksConfig;
   retargetingScripts: RetargetingScript[];
+  landingMode: LandingMode;
+  backgroundUrl: string | null;
   isActive: boolean;
 }
 
@@ -108,6 +113,8 @@ export interface AdminSettings {
   plan: AdminPlan;
   clickLimitMonthly: number;
   trackingEnabled: boolean;
+  landingEnabled: boolean;
+  globalBackgroundUrl: string | null;
   limitBehavior: TrackingLimitBehavior;
   usageThisMonth: number;
   limitReached: boolean;
@@ -120,6 +127,13 @@ export interface LinkOverviewStats {
   lastClickAt: string | null;
   uniqueClicks: number;
   nonUniqueClicks: number;
+  visits: number;
+  landingViews: number;
+  humanClicks: number;
+  redirects: number;
+  directRedirects: number;
+  botHits: number;
+  prefetchHits: number;
 }
 
 export interface TimeSeriesPoint {

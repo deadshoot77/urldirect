@@ -1,11 +1,44 @@
 import { createHash } from "node:crypto";
 import type { NextRequest } from "next/server";
 import { env } from "@/lib/env";
-import type { DeviceType } from "@/lib/types";
+import type { DeviceType, TrafficCategory } from "@/lib/types";
 
 const BOT_REGEX = /(bot|crawler|spider|crawling|headless|preview)/i;
 const MOBILE_REGEX = /(android|iphone|ipad|ipod|mobile|windows phone)/i;
 const TABLET_REGEX = /(ipad|tablet|kindle|silk)/i;
+const EXTRA_BOT_REGEX =
+  /(discordbot|telegrambot|slackbot|twitterbot|facebookexternalhit|facebot|linkedinbot|whatsapp|scanner|curl|wget|python-requests|postmanruntime)/i;
+const PREFETCH_UA_REGEX =
+  /(preview|prerender|prefetch|headless|facebookexternalhit|discordbot|telegrambot|slackbot|whatsapp|skypeuripreview)/i;
+const IN_APP_BROWSER_REGEX =
+  /(tiktok|musical_ly|ttwebview|bytedance|instagram|fbav|fb_iab|line\/|micromessenger|snapchat|wv\)|webview|gsa\/|linkedinapp)/i;
+const TIKTOK_IN_APP_REGEX = /(tiktok|musical_ly|bytedance|ttwebview|bytedancewebview)/i;
+const PREFETCH_HEADER_KEYS = [
+  "purpose",
+  "sec-purpose",
+  "x-purpose",
+  "x-moz",
+  "x-prefetch",
+  "x-prerender"
+] as const;
+const PREFETCH_HEADER_HINTS = /(prefetch|prerender|preview|next-page|safe-preview|link-preview)/i;
+const TRACKING_HEADER_KEYS = [
+  "purpose",
+  "sec-purpose",
+  "sec-fetch-mode",
+  "sec-fetch-site",
+  "sec-fetch-dest",
+  "sec-ch-ua",
+  "sec-ch-ua-mobile",
+  "sec-ch-ua-platform",
+  "x-forwarded-for",
+  "x-real-ip",
+  "x-nf-client-connection-ip",
+  "x-nf-country",
+  "x-nf-geo",
+  "referer",
+  "accept-language"
+] as const;
 
 export interface UserAgentProfile {
   device: string;
@@ -19,6 +52,14 @@ export interface GeoData {
   country: string;
   region: string | null;
   city: string | null;
+}
+
+export interface TrafficClassification {
+  category: TrafficCategory;
+  isBot: boolean;
+  isPrefetch: boolean;
+  prefetchSignals: string[];
+  botSignals: string[];
 }
 
 interface ParsedNetlifyGeoData {
@@ -201,7 +242,7 @@ export function parseUserAgent(userAgent: string | null): UserAgentProfile {
     };
   }
 
-  const isBot = BOT_REGEX.test(userAgent);
+  const isBot = BOT_REGEX.test(userAgent) || EXTRA_BOT_REGEX.test(userAgent);
   let device = "desktop";
   if (isBot) {
     device = "bot";
@@ -227,6 +268,95 @@ export function detectDeviceType(userAgent: string | null): DeviceType {
   if (parsed.device === "mobile" || parsed.device === "tablet") return "mobile";
   if (parsed.device === "desktop") return "desktop";
   return "unknown";
+}
+
+function getPrefetchSignals(request: NextRequest, userAgent: string | null): string[] {
+  const signals: string[] = [];
+  for (const key of PREFETCH_HEADER_KEYS) {
+    const value = request.headers.get(key);
+    if (value && PREFETCH_HEADER_HINTS.test(value)) {
+      signals.push(`${key}:${value.toLowerCase()}`);
+    }
+  }
+
+  const secFetchMode = request.headers.get("sec-fetch-mode");
+  if (secFetchMode && /prefetch/i.test(secFetchMode)) {
+    signals.push(`sec-fetch-mode:${secFetchMode.toLowerCase()}`);
+  }
+
+  if (request.method.toUpperCase() === "HEAD") {
+    signals.push("method:head");
+  }
+
+  if (userAgent && PREFETCH_UA_REGEX.test(userAgent)) {
+    signals.push("ua:prefetch");
+  }
+
+  return signals;
+}
+
+function getBotSignals(userAgent: string | null, uaProfile: UserAgentProfile): string[] {
+  const signals: string[] = [];
+  if (uaProfile.isBot) {
+    signals.push("ua:bot");
+  }
+  if (userAgent && EXTRA_BOT_REGEX.test(userAgent)) {
+    signals.push("ua:known-bot");
+  }
+  return signals;
+}
+
+export function classifyTraffic(
+  request: NextRequest,
+  userAgent: string | null,
+  uaProfile = parseUserAgent(userAgent)
+): TrafficClassification {
+  const prefetchSignals = getPrefetchSignals(request, userAgent);
+  const botSignals = getBotSignals(userAgent, uaProfile);
+  const isPrefetch = prefetchSignals.length > 0;
+  const isBot = botSignals.length > 0;
+
+  let category: TrafficCategory = "unknown";
+  if (isPrefetch) {
+    category = "prefetch";
+  } else if (isBot) {
+    category = "bot";
+  } else if (request.method.toUpperCase() === "GET") {
+    category = "human";
+  }
+
+  return {
+    category,
+    isBot,
+    isPrefetch,
+    prefetchSignals,
+    botSignals
+  };
+}
+
+export function isInAppBrowserRequest(userAgent: string | null): boolean {
+  if (!userAgent) return false;
+  return IN_APP_BROWSER_REGEX.test(userAgent);
+}
+
+export function isTikTokInAppRequest(userAgent: string | null, referer: string | null): boolean {
+  if (userAgent && TIKTOK_IN_APP_REGEX.test(userAgent)) {
+    return true;
+  }
+  if (!referer) return false;
+  return /tiktok\.com/i.test(referer);
+}
+
+export function getTrackingHeaders(request: NextRequest): Record<string, string> {
+  const output: Record<string, string> = {};
+  for (const key of TRACKING_HEADER_KEYS) {
+    const value = request.headers.get(key);
+    if (!value) continue;
+    const normalized = value.trim();
+    if (!normalized) continue;
+    output[key] = normalized;
+  }
+  return output;
 }
 
 export function getCountryCode(request: NextRequest): string {

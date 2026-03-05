@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isAdminRequest } from "@/lib/auth";
-import { createShortLink, getGlobalAnalyticsData, listShortLinksWithStats } from "@/lib/links";
+import { createShortLink, getAdminSettings, getGlobalAnalyticsData, listShortLinksWithStats } from "@/lib/links";
 import { shortLinkCreateSchema } from "@/lib/validation";
 
 export const runtime = "nodejs";
@@ -19,8 +19,12 @@ export async function GET(request: NextRequest) {
   const pageSize = Number(request.nextUrl.searchParams.get("pageSize") ?? "20");
 
   try {
-    const [links, globalAnalytics] = await Promise.all([listShortLinksWithStats(page, pageSize), getGlobalAnalyticsData()]);
-    return NextResponse.json({ links, globalAnalytics });
+    const [links, globalAnalytics, settings] = await Promise.all([
+      listShortLinksWithStats(page, pageSize),
+      getGlobalAnalyticsData(),
+      getAdminSettings()
+    ]);
+    return NextResponse.json({ links, globalAnalytics, settings });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to list short links" },
@@ -60,6 +64,8 @@ export async function POST(request: NextRequest) {
       routingRules: parsed.data.routing_rules,
       deepLinks: parsed.data.deep_links,
       retargetingScripts: parsed.data.retargeting_scripts,
+      landingMode: parsed.data.landing_mode,
+      backgroundUrl: parsed.data.background_url ?? null,
       isActive: parsed.data.is_active
     });
 

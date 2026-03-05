@@ -9,7 +9,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "tracking:repro": "node scripts/tracking-repro.mjs"
   },
   "dependencies": {
     "@netlify/plugin-nextjs": "^5.15.8",

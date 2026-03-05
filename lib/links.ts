@@ -4,6 +4,7 @@ import { env } from "@/lib/env";
 import type {
   AdminSettings,
   DeepLinksConfig,
+  LandingMode,
   LinkOverviewStats,
   RedirectStatus,
   RetargetingScript,
@@ -11,7 +12,9 @@ import type {
   ShortLink,
   ShortLinkListItem,
   TimeSeriesPoint,
-  TrackingLimitBehavior
+  TrackingEventType,
+  TrackingLimitBehavior,
+  TrafficCategory
 } from "@/lib/types";
 
 interface ShortLinkRow {
@@ -28,6 +31,8 @@ interface ShortLinkRow {
   routing_rules: unknown;
   deep_links: unknown;
   retargeting_scripts: unknown;
+  landing_mode: string | null;
+  background_url: string | null;
   is_active: boolean;
 }
 
@@ -46,6 +51,8 @@ interface ShortLinkListRow {
 
 interface SettingsRow {
   tracking_enabled: boolean;
+  landing_enabled: boolean;
+  global_background_url: string | null;
   limit_behavior: TrackingLimitBehavior;
 }
 
@@ -56,6 +63,13 @@ interface OverviewRow {
   last_click_at: string | null;
   unique_clicks: number;
   non_unique_clicks: number;
+  visits: number;
+  landing_views: number;
+  human_clicks: number;
+  redirects: number;
+  direct_redirects: number;
+  bot_hits: number;
+  prefetch_hits: number;
 }
 
 interface TimeSeriesRow {
@@ -130,6 +144,8 @@ export interface CreateShortLinkInput {
   routingRules?: RoutingRule[];
   deepLinks?: DeepLinksConfig;
   retargetingScripts?: RetargetingScript[];
+  landingMode?: LandingMode;
+  backgroundUrl?: string | null;
   isActive?: boolean;
 }
 
@@ -143,12 +159,22 @@ export interface UpdateShortLinkInput {
   routingRules?: RoutingRule[];
   deepLinks?: DeepLinksConfig;
   retargetingScripts?: RetargetingScript[];
+  landingMode?: LandingMode;
+  backgroundUrl?: string | null;
   isActive?: boolean;
 }
 
 export interface InsertClickEventInput {
   linkId: string;
   slug: string;
+  eventType: TrackingEventType;
+  trafficCategory: TrafficCategory;
+  requestMethod: string;
+  isBot: boolean;
+  isPrefetch: boolean;
+  dedupKey: string | null;
+  requestHeaders: Record<string, string>;
+  metadata: Record<string, unknown>;
   referrer: string | null;
   ua: string | null;
   ipHash: string;
@@ -178,6 +204,12 @@ interface ClickEventStatRow {
   platform: string | null;
   source: string | null;
   is_unique: boolean;
+  event_type: string | null;
+  traffic_category: string | null;
+  request_method: string | null;
+  is_bot: boolean | null;
+  is_prefetch: boolean | null;
+  metadata: unknown;
 }
 
 interface AggregatedGlobalAnalyticsData {
@@ -318,6 +350,8 @@ function mapShortLink(row: ShortLinkRow): ShortLink {
     routingRules: parseRoutingRules(row.routing_rules),
     deepLinks: parseDeepLinks(row.deep_links),
     retargetingScripts: parseRetargetingScripts(row.retargeting_scripts),
+    landingMode: normalizeLandingMode(row.landing_mode),
+    backgroundUrl: toStringOrNull(row.background_url),
     isActive: Boolean(row.is_active)
   };
 }
@@ -346,6 +380,31 @@ function normalizeLimitBehavior(value: string | null | undefined): TrackingLimit
   return value === "minimal" ? "minimal" : env.TRACKING_LIMIT_BEHAVIOR;
 }
 
+function normalizeLandingMode(value: string | null | undefined): LandingMode {
+  if (value === "on" || value === "off") return value;
+  return "inherit";
+}
+
+function normalizeTrackingEventType(value: string | null | undefined): TrackingEventType {
+  if (value === "visit" || value === "landing_view" || value === "human_click" || value === "redirect") {
+    return value;
+  }
+  return "redirect";
+}
+
+function normalizeTrafficCategory(
+  value: string | null | undefined,
+  isBot = false,
+  isPrefetch = false
+): TrafficCategory {
+  if (isPrefetch) return "prefetch";
+  if (isBot) return "bot";
+  if (value === "human" || value === "bot" || value === "prefetch" || value === "unknown") {
+    return value;
+  }
+  return "unknown";
+}
+
 export async function getCurrentMonthClicks(): Promise<number> {
   const rows = await runRpcList<{ total_clicks: number }>("current_month_clicks");
   return toNumber(rows[0]?.total_clicks);
@@ -362,12 +421,16 @@ export async function getAdminSettings(): Promise<AdminSettings> {
 
   const usageThisMonth = await getCurrentMonthClicks().catch(() => 0);
   const trackingEnabled = row?.tracking_enabled ?? env.TRACKING_ENABLED_DEFAULT;
+  const landingEnabled = row?.landing_enabled ?? false;
+  const globalBackgroundUrl = toStringOrNull(row?.global_background_url);
   const limitBehavior = normalizeLimitBehavior(row?.limit_behavior);
 
   return {
     plan: "pro",
     clickLimitMonthly: Number.MAX_SAFE_INTEGER,
     trackingEnabled,
+    landingEnabled,
+    globalBackgroundUrl,
     limitBehavior,
     usageThisMonth,
     limitReached: false
@@ -500,7 +563,13 @@ async function aggregateGlobalAnalytics(batchSize = 1000): Promise<AggregatedGlo
   const utcTodayStart = utcDayEnd;
   const last7DaysStart = utcTodayStart - 6 * DAY_MS;
 
-  let totalClicks = 0;
+  let redirects = 0;
+  let visits = 0;
+  let landingViews = 0;
+  let humanClicks = 0;
+  let directRedirects = 0;
+  let botHits = 0;
+  let prefetchHits = 0;
   let clicksToday = 0;
   let clicksLast7Days = 0;
   let uniqueClicks = 0;
@@ -529,7 +598,9 @@ async function aggregateGlobalAnalytics(batchSize = 1000): Promise<AggregatedGlo
   while (true) {
     const { data, error } = await getSupabaseAdminClient()
       .from("click_events")
-      .select("slug, created_at, country, region, city, source, browser, device, language, platform, is_unique")
+      .select(
+        "slug, created_at, country, region, city, source, browser, device, language, platform, is_unique, event_type, traffic_category, request_method, is_bot, is_prefetch, metadata"
+      )
       .order("created_at", { ascending: false })
       .range(offset, offset + safeBatchSize - 1);
 
@@ -543,11 +614,42 @@ async function aggregateGlobalAnalytics(batchSize = 1000): Promise<AggregatedGlo
     }
 
     for (const row of rows) {
-      totalClicks += 1;
+      const eventType = normalizeTrackingEventType(row.event_type);
+      const trafficCategory = normalizeTrafficCategory(row.traffic_category, Boolean(row.is_bot), Boolean(row.is_prefetch));
+      const requestMethod = toString(row.request_method || "GET").trim().toUpperCase() || "GET";
+
+      if (eventType === "visit") {
+        visits += 1;
+      } else if (eventType === "landing_view") {
+        landingViews += 1;
+      } else if (eventType === "human_click") {
+        humanClicks += 1;
+      }
+
+      if (trafficCategory === "bot") {
+        botHits += 1;
+      } else if (trafficCategory === "prefetch") {
+        prefetchHits += 1;
+      }
+
+      const isHumanRedirect = eventType === "redirect" && trafficCategory === "human" && requestMethod === "GET";
+      if (!isHumanRedirect) {
+        continue;
+      }
+
+      redirects += 1;
       if (row.is_unique) {
         uniqueClicks += 1;
       } else {
         nonUniqueClicks += 1;
+      }
+
+      const metadata =
+        row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+          ? (row.metadata as Record<string, unknown>)
+          : null;
+      if (metadata?.redirect_path === "direct") {
+        directRedirects += 1;
       }
 
       incrementCounter(linksCounter, normalizeSlugLabel(row.slug));
@@ -618,12 +720,19 @@ async function aggregateGlobalAnalytics(batchSize = 1000): Promise<AggregatedGlo
   }));
 
   const overview: LinkOverviewStats = {
-    totalClicks,
+    totalClicks: redirects,
     qrScans: 0,
     clicksToday,
     lastClickAt,
     uniqueClicks,
-    nonUniqueClicks
+    nonUniqueClicks,
+    visits,
+    landingViews,
+    humanClicks,
+    redirects,
+    directRedirects,
+    botHits,
+    prefetchHits
   };
 
   return {
@@ -641,8 +750,12 @@ async function aggregateGlobalAnalytics(batchSize = 1000): Promise<AggregatedGlo
     topDays,
     popularHours,
     clickType: [
-      { label: "Unique", clicks: uniqueClicks },
-      { label: "Non-Unique", clicks: nonUniqueClicks }
+      { label: "Visits", clicks: visits },
+      { label: "Landing Views", clicks: landingViews },
+      { label: "Human Clicks", clicks: humanClicks },
+      { label: "Redirects (human)", clicks: redirects },
+      { label: "Bots", clicks: botHits },
+      { label: "Prefetch", clicks: prefetchHits }
     ],
     topSocialPlatforms: toSortedLabelCounts(socialCounter, 8),
     topSources: toSortedLabelCounts(sourcesCounter, 8),
@@ -730,6 +843,8 @@ export async function listShortLinksWithStats(page = 1, pageSize = 20): Promise<
     routingRules: [],
     deepLinks: {},
     retargetingScripts: [],
+    landingMode: "inherit" as LandingMode,
+    backgroundUrl: null,
     isActive: true,
     clicksReceived: toNumber(row.clicks_received),
     clicksToday: toNumber(row.clicks_today),
@@ -752,7 +867,7 @@ export async function getShortLinkById(id: string): Promise<ShortLink | null> {
   const { data, error } = await getSupabaseAdminClient()
     .from("short_links")
     .select(
-      "id, slug, destination_url, created_at, updated_at, created_by, title, is_favorite, tags, redirect_type, routing_rules, deep_links, retargeting_scripts, is_active"
+      "id, slug, destination_url, created_at, updated_at, created_by, title, is_favorite, tags, redirect_type, routing_rules, deep_links, retargeting_scripts, landing_mode, background_url, is_active"
     )
     .eq("id", id)
     .limit(1)
@@ -769,7 +884,7 @@ export async function getShortLinkBySlug(slug: string): Promise<ShortLink | null
   const { data, error } = await getSupabaseAdminClient()
     .from("short_links")
     .select(
-      "id, slug, destination_url, created_at, updated_at, created_by, title, is_favorite, tags, redirect_type, routing_rules, deep_links, retargeting_scripts, is_active"
+      "id, slug, destination_url, created_at, updated_at, created_by, title, is_favorite, tags, redirect_type, routing_rules, deep_links, retargeting_scripts, landing_mode, background_url, is_active"
     )
     .eq("slug", normalized)
     .eq("is_active", true)
@@ -811,6 +926,12 @@ function buildMutationPayload(input: UpdateShortLinkInput | CreateShortLinkInput
   if ("retargetingScripts" in input && Array.isArray(input.retargetingScripts)) {
     payload.retargeting_scripts = input.retargetingScripts;
   }
+  if ("landingMode" in input && input.landingMode) {
+    payload.landing_mode = normalizeLandingMode(input.landingMode);
+  }
+  if ("backgroundUrl" in input && input.backgroundUrl !== undefined) {
+    payload.background_url = input.backgroundUrl ?? null;
+  }
   if ("isActive" in input && typeof input.isActive === "boolean") {
     payload.is_active = input.isActive;
   }
@@ -824,7 +945,7 @@ export async function createShortLink(input: CreateShortLinkInput): Promise<Shor
     .from("short_links")
     .insert(payload)
     .select(
-      "id, slug, destination_url, created_at, updated_at, created_by, title, is_favorite, tags, redirect_type, routing_rules, deep_links, retargeting_scripts, is_active"
+      "id, slug, destination_url, created_at, updated_at, created_by, title, is_favorite, tags, redirect_type, routing_rules, deep_links, retargeting_scripts, landing_mode, background_url, is_active"
     )
     .limit(1)
     .single();
@@ -850,7 +971,7 @@ export async function updateShortLink(id: string, input: UpdateShortLinkInput): 
     .update(payload)
     .eq("id", id)
     .select(
-      "id, slug, destination_url, created_at, updated_at, created_by, title, is_favorite, tags, redirect_type, routing_rules, deep_links, retargeting_scripts, is_active"
+      "id, slug, destination_url, created_at, updated_at, created_by, title, is_favorite, tags, redirect_type, routing_rules, deep_links, retargeting_scripts, landing_mode, background_url, is_active"
     )
     .limit(1)
     .single();
@@ -859,6 +980,13 @@ export async function updateShortLink(id: string, input: UpdateShortLinkInput): 
     throw new Error(`updateShortLink failed: ${error.message}`);
   }
   return mapShortLink(data as ShortLinkRow);
+}
+
+export async function deleteShortLink(id: string): Promise<void> {
+  const { error } = await getSupabaseAdminClient().from("short_links").update({ is_active: false }).eq("id", id);
+  if (error) {
+    throw new Error(`deleteShortLink failed: ${error.message}`);
+  }
 }
 
 export async function getLinkOverview(linkId: string): Promise<LinkOverviewStats> {
@@ -870,7 +998,14 @@ export async function getLinkOverview(linkId: string): Promise<LinkOverviewStats
     clicksToday: toNumber(row?.clicks_today),
     lastClickAt: toStringOrNull(row?.last_click_at),
     uniqueClicks: toNumber(row?.unique_clicks),
-    nonUniqueClicks: toNumber(row?.non_unique_clicks)
+    nonUniqueClicks: toNumber(row?.non_unique_clicks),
+    visits: toNumber(row?.visits),
+    landingViews: toNumber(row?.landing_views),
+    humanClicks: toNumber(row?.human_clicks),
+    redirects: toNumber(row?.redirects),
+    directRedirects: toNumber(row?.direct_redirects),
+    botHits: toNumber(row?.bot_hits),
+    prefetchHits: toNumber(row?.prefetch_hits)
   };
 }
 
@@ -954,8 +1089,12 @@ export async function getLinkAnalyticsData(linkId: string): Promise<LinkAnalytic
   ]);
 
   const clickType: LabelCount[] = [
-    { label: "Unique", clicks: overview.uniqueClicks },
-    { label: "Non-Unique", clicks: overview.nonUniqueClicks }
+    { label: "Visits", clicks: overview.visits },
+    { label: "Landing Views", clicks: overview.landingViews },
+    { label: "Human Clicks", clicks: overview.humanClicks },
+    { label: "Redirects (human)", clicks: overview.redirects },
+    { label: "Bots", clicks: overview.botHits },
+    { label: "Prefetch", clicks: overview.prefetchHits }
   ];
 
   return {
@@ -987,19 +1126,41 @@ export async function isUniqueClick(linkId: string, ipHash: string): Promise<boo
     .select("id")
     .eq("link_id", linkId)
     .eq("ip_hash", ipHash)
+    .eq("event_type", "redirect")
+    .eq("traffic_category", "human")
+    .eq("request_method", "GET")
     .gte("created_at", sinceIso)
     .limit(1);
 
-  if (error) {
-    throw new Error(`isUniqueClick failed: ${error.message}`);
+  if (!error) {
+    return !data || data.length === 0;
   }
-  return !data || data.length === 0;
+
+  const fallback = await getSupabaseAdminClient()
+    .from("click_events")
+    .select("id")
+    .eq("link_id", linkId)
+    .eq("ip_hash", ipHash)
+    .gte("created_at", sinceIso)
+    .limit(1);
+  if (fallback.error) {
+    throw new Error(`isUniqueClick failed: ${fallback.error.message}`);
+  }
+  return !fallback.data || fallback.data.length === 0;
 }
 
 export async function insertClickEvent(input: InsertClickEventInput, minimal = false): Promise<void> {
   const payload: Record<string, unknown> = {
     link_id: input.linkId,
     slug: input.slug,
+    event_type: input.eventType,
+    traffic_category: input.trafficCategory,
+    request_method: input.requestMethod,
+    is_bot: input.isBot,
+    is_prefetch: input.isPrefetch,
+    dedup_key: input.dedupKey,
+    request_headers: input.requestHeaders,
+    metadata: input.metadata,
     ip_hash: input.ipHash,
     is_unique: input.isUnique,
     source: input.source
@@ -1020,7 +1181,37 @@ export async function insertClickEvent(input: InsertClickEventInput, minimal = f
     payload.utm = input.utm;
   }
 
-  const { error } = await getSupabaseAdminClient().from("click_events").insert(payload);
+  let error: { message: string } | null = null;
+  if (input.dedupKey) {
+    const upsertResult = await getSupabaseAdminClient().from("click_events").upsert(payload, {
+      onConflict: "event_type,dedup_key",
+      ignoreDuplicates: true
+    });
+    error = upsertResult.error;
+
+    if (error && /no unique|no unique or exclusion|there is no unique|42P10/i.test(error.message)) {
+      const existingResult = await getSupabaseAdminClient()
+        .from("click_events")
+        .select("id")
+        .eq("event_type", input.eventType)
+        .eq("dedup_key", input.dedupKey)
+        .limit(1);
+
+      if (existingResult.error) {
+        throw new Error(`insertClickEvent dedup fallback failed: ${existingResult.error.message}`);
+      }
+      if (existingResult.data && existingResult.data.length > 0) {
+        return;
+      }
+
+      const insertResult = await getSupabaseAdminClient().from("click_events").insert(payload);
+      error = insertResult.error;
+    }
+  } else {
+    const insertResult = await getSupabaseAdminClient().from("click_events").insert(payload);
+    error = insertResult.error;
+  }
+
   if (error) {
     throw new Error(`insertClickEvent failed: ${error.message}`);
   }
@@ -1029,10 +1220,14 @@ export async function insertClickEvent(input: InsertClickEventInput, minimal = f
 export async function updateAdminSettings(
   patch: Partial<{
     trackingEnabled: boolean;
+    landingEnabled: boolean;
+    globalBackgroundUrl: string | null;
   }>
 ): Promise<void> {
   const payload: Record<string, unknown> = {};
   if (typeof patch.trackingEnabled === "boolean") payload.tracking_enabled = patch.trackingEnabled;
+  if (typeof patch.landingEnabled === "boolean") payload.landing_enabled = patch.landingEnabled;
+  if (patch.globalBackgroundUrl !== undefined) payload.global_background_url = patch.globalBackgroundUrl;
   if (Object.keys(payload).length === 0) return;
 
   const { error } = await getSupabaseAdminClient().from("admin_settings").update(payload).eq("id", 1);

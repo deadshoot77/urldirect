@@ -43,9 +43,10 @@ export const redirectRuleInputSchema = z
 const optionalUrlSchema = z
   .union([z.string().url("must be a valid URL"), z.literal(""), z.null(), z.undefined()])
   .transform((value) => {
+    if (value === null) return null;
     if (typeof value !== "string") return undefined;
     const trimmed = value.trim();
-    return trimmed.length > 0 ? trimmed : undefined;
+    return trimmed.length > 0 ? trimmed : null;
   });
 
 export const routingRuleSchema = z.object({
@@ -59,17 +60,19 @@ export const routingRuleSchema = z.object({
 });
 
 export const deepLinksSchema = z.object({
-  ios_url: optionalUrlSchema,
-  android_url: optionalUrlSchema,
-  fallback_url: optionalUrlSchema
+  ios_url: optionalUrlSchema.transform((value) => value ?? undefined),
+  android_url: optionalUrlSchema.transform((value) => value ?? undefined),
+  fallback_url: optionalUrlSchema.transform((value) => value ?? undefined)
 });
+
+export const landingModeSchema = z.enum(["inherit", "on", "off"]);
 
 export const retargetingScriptSchema = z.object({
   id: z.string().trim().min(1).optional(),
   name: z.string().trim().max(120).optional(),
   type: z.enum(["inline", "external", "pixel"]).optional().default("inline"),
   content: z.string().optional(),
-  src: optionalUrlSchema,
+  src: optionalUrlSchema.transform((value) => value ?? undefined),
   enabled: z.boolean().optional().default(true)
 });
 
@@ -83,6 +86,8 @@ export const shortLinkCreateSchema = z.object({
   routing_rules: z.array(routingRuleSchema).default([]),
   deep_links: deepLinksSchema.default({}),
   retargeting_scripts: z.array(retargetingScriptSchema).default([]),
+  landing_mode: landingModeSchema.default("inherit"),
+  background_url: optionalUrlSchema,
   is_active: z.boolean().default(true)
 });
 
@@ -97,7 +102,9 @@ export const shortLinkPatchSchema = shortLinkCreateSchema
 
 export const adminSettingsPatchSchema = z
   .object({
-    tracking_enabled: z.boolean().optional()
+    tracking_enabled: z.boolean().optional(),
+    landing_enabled: z.boolean().optional(),
+    global_background_url: optionalUrlSchema
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: "At least one setting must be provided"

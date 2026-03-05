@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import AdminLinksPageClient from "@/components/admin-links-page-client";
 import { isAdminAuthenticated } from "@/lib/auth";
-import { getGlobalAnalyticsData, listShortLinksWithStats } from "@/lib/links";
+import { getAdminSettings, getGlobalAnalyticsData, listShortLinksWithStats } from "@/lib/links";
 
 export const dynamic = "force-dynamic";
 
@@ -20,7 +20,11 @@ export default async function AdminLinksPage({ searchParams }: LinksPageProps) {
   const resolvedSearch = await searchParams;
   const page = Number(resolvedSearch.page ?? "1");
   const pageSize = Number(resolvedSearch.pageSize ?? "20");
-  const [links, globalAnalytics] = await Promise.all([listShortLinksWithStats(page, pageSize), getGlobalAnalyticsData()]);
+  const [links, globalAnalytics, settings] = await Promise.all([
+    listShortLinksWithStats(page, pageSize),
+    getGlobalAnalyticsData(),
+    getAdminSettings()
+  ]);
 
-  return <AdminLinksPageClient initialLinks={links} initialGlobalAnalytics={globalAnalytics} />;
+  return <AdminLinksPageClient initialLinks={links} initialGlobalAnalytics={globalAnalytics} initialSettings={settings} />;
 }

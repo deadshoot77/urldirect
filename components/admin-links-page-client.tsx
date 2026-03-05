@@ -5,12 +5,15 @@ import { useEffect, useMemo, useState } from "react";
 import AdminCharts from "@/components/admin-charts";
 import AdminLanguageToggle from "@/components/admin-language-toggle";
 import LogoutButton from "@/components/logout-button";
+import TopToast, { type TopToastKind, type TopToastState } from "@/components/top-toast";
 import type { GlobalAnalyticsData, LinkAnalyticsData, PaginatedShortLinks } from "@/lib/links";
 import { ADMIN_LANG_STORAGE_KEY, normalizeAdminLang, type AdminLang } from "@/lib/i18n";
+import type { AdminSettings } from "@/lib/types";
 
 interface AdminLinksPageClientProps {
   initialLinks: PaginatedShortLinks;
   initialGlobalAnalytics: GlobalAnalyticsData;
+  initialSettings: AdminSettings;
 }
 
 type ViewMode = "list" | "grid";
@@ -35,13 +38,26 @@ const words = {
     analyticsTab: "Analytics",
     globalStatsTitle: "Statistiques globales (tous les liens)",
     totalLinks: "Liens actifs",
-    totalClicks: "Clics totaux",
+    totalClicks: "Redirections (humains)",
     clicksToday: "Clics aujourd'hui",
     uniqueClicks: "Clics uniques",
     clicksLast7Days: "Clics (7 jours)",
     topLinks: "Top liens",
     topCountries: "Top pays",
     topSources: "Top sources",
+    trackingSettings: "Parametres tracking & landing",
+    trackingEnabled: "Tracking actif",
+    trackingDisabledHint: "Tracking desactive: active-le dans les parametres pour recommencer a compter.",
+    landingEnabled: "Landing TikTok active (globale)",
+    globalBackground: "Image de fond globale",
+    saveSettings: "Sauvegarder parametres",
+    savingSettings: "Sauvegarde...",
+    visits: "Visites",
+    landingViews: "Vues landing",
+    humanClicks: "Clics humains",
+    redirects: "Redirections (humains)",
+    botHits: "Bots",
+    prefetchHits: "Prefetch",
     noData: "Pas de donnees",
     sort: "Trier",
     latest: "Recents",
@@ -58,10 +74,13 @@ const words = {
     createLink: "Creer le lien",
     creating: "Creation...",
     cancel: "Annuler",
+    saved: "Sauvegarde effectuee",
+    deletedLink: "Lien supprime",
+    failedSave: "Echec de sauvegarde",
     refreshLinks: "Actualisation...",
     tableLinkTitle: "Titre du lien",
     tableDestinationUrl: "URL de destination",
-    tableClicksReceived: "Clics recus",
+    tableClicksReceived: "Redirects (humains)",
     tableCreationDate: "Date de creation",
     tableActions: "Actions",
     noLinksYet: "Aucun lien pour le moment.",
@@ -70,13 +89,18 @@ const words = {
     loadingStats: "Chargement des stats...",
     linkStatsTitle: "Stats du lien",
     copy: "Copier",
+    deleteLink: "Supprimer",
+    deletingLink: "Suppression...",
+    confirmDelete: "Supprimer ce lien ? Le slug ne sera plus actif.",
+    failedDelete: "Echec suppression",
     open: "Ouvrir",
     previous: "Precedent",
     next: "Suivant",
     page: "Page",
     copiedPrefix: "Copie",
     never: "Jamais",
-    clicks: "clics"
+    clicks: "redirections humaines",
+    zeroStatsHint: "Stats a 0: verifie tracking actif + migration SQL a jour (db/migrations.sql)."
   },
   en: {
     admin: "Admin",
@@ -89,13 +113,26 @@ const words = {
     analyticsTab: "Analytics",
     globalStatsTitle: "Global Stats (all links)",
     totalLinks: "Active links",
-    totalClicks: "Total clicks",
+    totalClicks: "Redirects (human)",
     clicksToday: "Clicks today",
     uniqueClicks: "Unique clicks",
     clicksLast7Days: "Clicks (7 days)",
     topLinks: "Top links",
     topCountries: "Top countries",
     topSources: "Top sources",
+    trackingSettings: "Tracking & landing settings",
+    trackingEnabled: "Tracking enabled",
+    trackingDisabledHint: "Tracking is disabled: enable it in settings to start counting again.",
+    landingEnabled: "TikTok landing enabled (global)",
+    globalBackground: "Global background image",
+    saveSettings: "Save settings",
+    savingSettings: "Saving...",
+    visits: "Visits",
+    landingViews: "Landing views",
+    humanClicks: "Human clicks",
+    redirects: "Redirects (human)",
+    botHits: "Bots",
+    prefetchHits: "Prefetch",
     noData: "No data",
     sort: "Sort",
     latest: "Latest",
@@ -112,10 +149,13 @@ const words = {
     createLink: "Create link",
     creating: "Creating...",
     cancel: "Cancel",
+    saved: "Saved",
+    deletedLink: "Link deleted",
+    failedSave: "Failed to save",
     refreshLinks: "Refreshing links...",
     tableLinkTitle: "Link title",
     tableDestinationUrl: "Destination URL",
-    tableClicksReceived: "Clicks received",
+    tableClicksReceived: "Redirects (human)",
     tableCreationDate: "Creation date",
     tableActions: "Actions",
     noLinksYet: "No links yet.",
@@ -124,13 +164,18 @@ const words = {
     loadingStats: "Loading stats...",
     linkStatsTitle: "Link stats",
     copy: "Copy",
+    deleteLink: "Delete",
+    deletingLink: "Deleting...",
+    confirmDelete: "Delete this link? The slug will no longer be active.",
+    failedDelete: "Delete failed",
     open: "Open",
     previous: "Previous",
     next: "Next",
     page: "Page",
     copiedPrefix: "Copied",
     never: "Never",
-    clicks: "clicks"
+    clicks: "human redirects",
+    zeroStatsHint: "Zero stats: verify tracking enabled and latest SQL migration applied (db/migrations.sql)."
   }
 } as const;
 
@@ -196,9 +241,14 @@ function StatsList({
   );
 }
 
-export default function AdminLinksPageClient({ initialLinks, initialGlobalAnalytics }: AdminLinksPageClientProps) {
+export default function AdminLinksPageClient({
+  initialLinks,
+  initialGlobalAnalytics,
+  initialSettings
+}: AdminLinksPageClientProps) {
   const [links, setLinks] = useState<PaginatedShortLinks>(initialLinks);
   const [globalAnalytics, setGlobalAnalytics] = useState<GlobalAnalyticsData>(initialGlobalAnalytics);
+  const [settings, setSettings] = useState<AdminSettings>(initialSettings);
   const [linkAnalytics, setLinkAnalytics] = useState<Record<string, LinkAnalyticsData>>({});
   const [activeLinkStats, setActiveLinkStats] = useState<{
     id: string;
@@ -212,8 +262,11 @@ export default function AdminLinksPageClient({ initialLinks, initialGlobalAnalyt
   const [creating, setCreating] = useState(false);
   const [showNewLinkForm, setShowNewLinkForm] = useState(false);
   const [form, setForm] = useState<NewLinkFormState>(() => createDefaultFormState());
-  const [feedback, setFeedback] = useState<string | null>(null);
+  const [toast, setToast] = useState<TopToastState | null>(null);
   const [origin, setOrigin] = useState("");
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [deletingLinkId, setDeletingLinkId] = useState<string | null>(null);
+  const [globalBackgroundUrl, setGlobalBackgroundUrl] = useState(initialSettings.globalBackgroundUrl ?? "");
 
   useEffect(() => {
     setOrigin(window.location.origin);
@@ -221,17 +274,73 @@ export default function AdminLinksPageClient({ initialLinks, initialGlobalAnalyt
     setLang(stored);
   }, []);
 
+  useEffect(() => {
+    setGlobalBackgroundUrl(settings.globalBackgroundUrl ?? "");
+  }, [settings.globalBackgroundUrl]);
+
   const copy = words[lang];
 
   const statsCards = useMemo(
     () => [
       { label: copy.totalLinks, value: globalAnalytics.totalLinks },
-      { label: copy.clicksLast7Days, value: globalAnalytics.clicksLast7Days }
+      { label: copy.clicksLast7Days, value: globalAnalytics.clicksLast7Days },
+      { label: copy.redirects, value: globalAnalytics.overview.redirects },
+      { label: copy.visits, value: globalAnalytics.overview.visits }
     ],
-    [copy.clicksLast7Days, copy.totalLinks, globalAnalytics.clicksLast7Days, globalAnalytics.totalLinks]
+    [
+      copy.clicksLast7Days,
+      copy.redirects,
+      copy.totalLinks,
+      copy.visits,
+      globalAnalytics.clicksLast7Days,
+      globalAnalytics.overview.redirects,
+      globalAnalytics.overview.visits,
+      globalAnalytics.totalLinks
+    ]
   );
 
+  const funnelCards = useMemo(
+    () => [
+      { label: copy.visits, value: globalAnalytics.overview.visits },
+      { label: copy.landingViews, value: globalAnalytics.overview.landingViews },
+      { label: copy.humanClicks, value: globalAnalytics.overview.humanClicks },
+      { label: copy.redirects, value: globalAnalytics.overview.redirects },
+      { label: copy.botHits, value: globalAnalytics.overview.botHits },
+      { label: copy.prefetchHits, value: globalAnalytics.overview.prefetchHits }
+    ],
+    [
+      copy.botHits,
+      copy.humanClicks,
+      copy.landingViews,
+      copy.prefetchHits,
+      copy.redirects,
+      copy.visits,
+      globalAnalytics.overview.botHits,
+      globalAnalytics.overview.humanClicks,
+      globalAnalytics.overview.landingViews,
+      globalAnalytics.overview.prefetchHits,
+      globalAnalytics.overview.redirects,
+      globalAnalytics.overview.visits
+    ]
+  );
+
+  const totalTrackedEvents =
+    globalAnalytics.overview.visits +
+    globalAnalytics.overview.landingViews +
+    globalAnalytics.overview.humanClicks +
+    globalAnalytics.overview.redirects +
+    globalAnalytics.overview.botHits +
+    globalAnalytics.overview.prefetchHits;
+
   const activeLinkAnalytics = activeLinkStats ? linkAnalytics[activeLinkStats.id] : null;
+
+  function showToast(message: string, kind: TopToastKind = "info") {
+    setToast({
+      id: Date.now() + Math.floor(Math.random() * 1000),
+      message,
+      kind
+    });
+  }
 
   function setLanguage(nextLang: AdminLang) {
     setLang(nextLang);
@@ -249,25 +358,56 @@ export default function AdminLinksPageClient({ initialLinks, initialGlobalAnalyt
         | {
             links?: PaginatedShortLinks;
             globalAnalytics?: GlobalAnalyticsData;
+            settings?: AdminSettings;
             error?: string;
           }
         | null;
 
-      if (!response.ok || !payload?.links || !payload?.globalAnalytics) {
+      if (!response.ok || !payload?.links || !payload?.globalAnalytics || !payload?.settings) {
         throw new Error(toErrorMessage(payload, "Failed to refresh links"));
       }
 
       setLinks(payload.links);
       setGlobalAnalytics(payload.globalAnalytics);
+      setSettings(payload.settings);
     } catch (error) {
-      setFeedback(error instanceof Error ? error.message : "Failed to refresh links");
+      showToast(error instanceof Error ? error.message : "Failed to refresh links", "error");
     } finally {
       setLoading(false);
     }
   }
 
+  async function saveSettings() {
+    setSavingSettings(true);
+    try {
+      const response = await fetch("/api/admin/settings", {
+        method: "PATCH",
+        credentials: "include",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          tracking_enabled: settings.trackingEnabled,
+          landing_enabled: settings.landingEnabled,
+          global_background_url: globalBackgroundUrl.trim() || null
+        })
+      });
+
+      const payload = (await response.json().catch(() => null)) as { settings?: AdminSettings; error?: string } | null;
+      if (!response.ok || !payload?.settings) {
+        throw new Error(toErrorMessage(payload, "Failed to update settings"));
+      }
+
+      setSettings(payload.settings);
+      showToast(copy.saved, "success");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : copy.failedSave, "error");
+    } finally {
+      setSavingSettings(false);
+    }
+  }
+
   async function submitNewLink() {
-    setFeedback(null);
     setCreating(true);
     try {
       const tags = form.tags
@@ -290,7 +430,9 @@ export default function AdminLinksPageClient({ initialLinks, initialGlobalAnalyt
           is_active: true,
           routing_rules: [],
           deep_links: {},
-          retargeting_scripts: []
+          retargeting_scripts: [],
+          landing_mode: "inherit",
+          background_url: null
         })
       });
 
@@ -302,15 +444,15 @@ export default function AdminLinksPageClient({ initialLinks, initialGlobalAnalyt
       setForm(createDefaultFormState());
       setShowNewLinkForm(false);
       await refresh(1);
+      showToast(copy.saved, "success");
     } catch (error) {
-      setFeedback(error instanceof Error ? error.message : "Failed to create link");
+      showToast(error instanceof Error ? error.message : "Failed to create link", "error");
     } finally {
       setCreating(false);
     }
   }
 
   async function toggleFavorite(linkId: string, isFavorite: boolean) {
-    setFeedback(null);
     try {
       const response = await fetch(`/api/admin/links/${encodeURIComponent(linkId)}`, {
         method: "PATCH",
@@ -327,8 +469,9 @@ export default function AdminLinksPageClient({ initialLinks, initialGlobalAnalyt
         throw new Error(toErrorMessage(payload, "Failed to update favorite"));
       }
       await refresh(links.page);
+      showToast(copy.saved, "success");
     } catch (error) {
-      setFeedback(error instanceof Error ? error.message : "Failed to update favorite");
+      showToast(error instanceof Error ? error.message : "Failed to update favorite", "error");
     }
   }
 
@@ -363,7 +506,7 @@ export default function AdminLinksPageClient({ initialLinks, initialGlobalAnalyt
         [linkId]: payload.analytics as LinkAnalyticsData
       }));
     } catch (error) {
-      setFeedback(error instanceof Error ? error.message : "Failed to fetch link analytics");
+      showToast(error instanceof Error ? error.message : "Failed to fetch link analytics", "error");
     } finally {
       setLoadingLinkStatsId((current) => (current === linkId ? null : current));
     }
@@ -373,7 +516,40 @@ export default function AdminLinksPageClient({ initialLinks, initialGlobalAnalyt
     if (!origin) return;
     const full = `${origin}/${slug}`;
     await navigator.clipboard.writeText(full);
-    setFeedback(`${copy.copiedPrefix}: ${full}`);
+    showToast(`${copy.copiedPrefix}: ${full}`, "info");
+  }
+
+  async function deleteLink(linkId: string) {
+    if (!window.confirm(copy.confirmDelete)) {
+      return;
+    }
+
+    setDeletingLinkId(linkId);
+    try {
+      const response = await fetch(`/api/admin/links/${encodeURIComponent(linkId)}`, {
+        method: "DELETE",
+        credentials: "include"
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(toErrorMessage(payload, copy.failedDelete));
+      }
+
+      if (activeLinkStats?.id === linkId) {
+        setActiveLinkStats(null);
+      }
+      setLinkAnalytics((current) => {
+        const next = { ...current };
+        delete next[linkId];
+        return next;
+      });
+      await refresh(links.page);
+      showToast(copy.deletedLink, "success");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : copy.failedDelete, "error");
+    } finally {
+      setDeletingLinkId((current) => (current === linkId ? null : current));
+    }
   }
 
   return (
@@ -388,6 +564,7 @@ export default function AdminLinksPageClient({ initialLinks, initialGlobalAnalyt
           <LogoutButton label={copy.logout} loadingLabel={copy.signingOut} />
         </div>
       </header>
+      <TopToast toast={toast} onDismiss={() => setToast(null)} />
 
       <nav className="rb-section-tabs" aria-label={copy.tabsAria}>
         <button type="button" className={activeSection === "links" ? "active" : ""} onClick={() => setActiveSection("links")}>
@@ -402,14 +579,69 @@ export default function AdminLinksPageClient({ initialLinks, initialGlobalAnalyt
         </button>
       </nav>
 
-      {feedback ? <p className="rb-feedback">{feedback}</p> : null}
       {loading ? <p className="rb-feedback">{copy.refreshLinks}</p> : null}
+      {!settings.trackingEnabled ? <p className="rb-feedback">{copy.trackingDisabledHint}</p> : null}
+      {settings.trackingEnabled && totalTrackedEvents === 0 ? <p className="rb-feedback">{copy.zeroStatsHint}</p> : null}
 
       {activeSection === "analytics" ? (
         <section className="rb-panel">
           <h2>{copy.globalStatsTitle}</h2>
+          <article className="rb-panel">
+            <h3>{copy.trackingSettings}</h3>
+            <div className="rb-form-grid">
+              <label className="inline-checkbox">
+                <input
+                  type="checkbox"
+                  checked={settings.trackingEnabled}
+                  onChange={(event) =>
+                    setSettings((current) => ({
+                      ...current,
+                      trackingEnabled: event.target.checked
+                    }))
+                  }
+                />
+                <span>{copy.trackingEnabled}</span>
+              </label>
+              <label className="inline-checkbox">
+                <input
+                  type="checkbox"
+                  checked={settings.landingEnabled}
+                  onChange={(event) =>
+                    setSettings((current) => ({
+                      ...current,
+                      landingEnabled: event.target.checked
+                    }))
+                  }
+                />
+                <span>{copy.landingEnabled}</span>
+              </label>
+              <label htmlFor="global_background_url">
+                {copy.globalBackground}
+                <input
+                  id="global_background_url"
+                  type="url"
+                  value={globalBackgroundUrl}
+                  placeholder="https://..."
+                  onChange={(event) => setGlobalBackgroundUrl(event.target.value)}
+                />
+              </label>
+            </div>
+            <div className="rb-actions">
+              <button type="button" className="rb-primary" disabled={savingSettings} onClick={() => void saveSettings()}>
+                {savingSettings ? copy.savingSettings : copy.saveSettings}
+              </button>
+            </div>
+          </article>
           <div className="rb-global-metrics">
             {statsCards.map((item) => (
+              <article key={item.label}>
+                <span>{item.label}</span>
+                <strong>{formatNumber(item.value, lang)}</strong>
+              </article>
+            ))}
+          </div>
+          <div className="rb-global-metrics">
+            {funnelCards.map((item) => (
               <article key={item.label}>
                 <span>{item.label}</span>
                 <strong>{formatNumber(item.value, lang)}</strong>
@@ -574,6 +806,14 @@ export default function AdminLinksPageClient({ initialLinks, initialGlobalAnalyt
                             <button type="button" onClick={() => void toggleFavorite(link.id, link.isFavorite)}>
                               {link.isFavorite ? "★" : "☆"}
                             </button>
+                            <button
+                              type="button"
+                              className="rb-danger"
+                              disabled={deletingLinkId === link.id}
+                              onClick={() => void deleteLink(link.id)}
+                            >
+                              {deletingLinkId === link.id ? copy.deletingLink : copy.deleteLink}
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -613,6 +853,14 @@ export default function AdminLinksPageClient({ initialLinks, initialGlobalAnalyt
                     </button>
                     <button type="button" onClick={() => void toggleLinkStats(link.id, link.slug)}>
                       {activeLinkStats?.id === link.id ? copy.hideStats : copy.showStats}
+                    </button>
+                    <button
+                      type="button"
+                      className="rb-danger"
+                      disabled={deletingLinkId === link.id}
+                      onClick={() => void deleteLink(link.id)}
+                    >
+                      {deletingLinkId === link.id ? copy.deletingLink : copy.deleteLink}
                     </button>
                     <Link href={`/admin/links/${link.id}`} className="rb-button-link">
                       {copy.open}

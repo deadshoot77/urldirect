@@ -13,7 +13,13 @@ const envSchema = z.object({
     .pipe(z.union([z.literal(301), z.literal(302)])),
   ADMIN_PASSWORD: z.string().min(10, "ADMIN_PASSWORD must be at least 10 chars"),
   AUTH_SECRET: z.string().min(32, "AUTH_SECRET must be at least 32 chars"),
+  TRACKING_TOKEN_SECRET: z.string().min(16, "TRACKING_TOKEN_SECRET must be at least 16 chars").optional(),
   IP_HASH_SALT: z.string().min(16, "IP_HASH_SALT must be at least 16 chars"),
+  COUNT_HEAD_VISITS: z
+    .enum(["true", "false"])
+    .optional()
+    .default("false")
+    .transform((value) => value === "true"),
   TRACKING_ENABLED_DEFAULT: z
     .enum(["true", "false"])
     .optional()

@@ -956,3 +956,496 @@ select
   rr.is_active
 from public.redirect_rules rr
 on conflict (slug) do nothing;
+
+-- 2026-03 tracking hardening + optional TikTok landing
+alter table if exists public.admin_settings
+  add column if not exists landing_enabled boolean not null default false,
+  add column if not exists global_background_url text;
+
+alter table if exists public.short_links
+  add column if not exists landing_mode text not null default 'inherit',
+  add column if not exists background_url text;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'short_links_landing_mode_check'
+  ) then
+    alter table public.short_links
+      add constraint short_links_landing_mode_check check (landing_mode in ('inherit', 'on', 'off'));
+  end if;
+end;
+$$;
+
+alter table if exists public.click_events
+  add column if not exists event_type text not null default 'redirect',
+  add column if not exists traffic_category text not null default 'unknown',
+  add column if not exists request_method text not null default 'GET',
+  add column if not exists is_bot boolean not null default false,
+  add column if not exists is_prefetch boolean not null default false,
+  add column if not exists dedup_key text,
+  add column if not exists request_headers jsonb not null default '{}'::jsonb,
+  add column if not exists metadata jsonb not null default '{}'::jsonb;
+
+update public.click_events
+set event_type = 'redirect'
+where event_type is null or btrim(event_type) = '';
+
+update public.click_events
+set traffic_category = case
+  when coalesce(device, '') = 'bot' then 'bot'
+  else 'unknown'
+end
+where traffic_category is null or btrim(traffic_category) = '';
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'click_events_event_type_check'
+  ) then
+    alter table public.click_events
+      add constraint click_events_event_type_check check (event_type in ('visit', 'landing_view', 'human_click', 'redirect'));
+  end if;
+
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'click_events_traffic_category_check'
+  ) then
+    alter table public.click_events
+      add constraint click_events_traffic_category_check check (traffic_category in ('human', 'bot', 'prefetch', 'unknown'));
+  end if;
+end;
+$$;
+
+create index if not exists idx_click_events_event_type on public.click_events(event_type);
+create index if not exists idx_click_events_traffic_category on public.click_events(traffic_category);
+create index if not exists idx_click_events_method on public.click_events(request_method);
+with ranked as (
+  select
+    ce.id,
+    row_number() over (partition by ce.event_type, ce.dedup_key order by ce.created_at asc, ce.id asc) as rn
+  from public.click_events ce
+  where ce.dedup_key is not null and btrim(ce.dedup_key) <> ''
+)
+delete from public.click_events ce
+using ranked r
+where ce.id = r.id
+  and r.rn > 1;
+
+drop index if exists public.idx_click_events_event_dedup;
+create unique index if not exists idx_click_events_event_dedup
+  on public.click_events(event_type, dedup_key);
+
+drop function if exists public.get_admin_settings();
+create or replace function public.get_admin_settings()
+returns table (
+  plan text,
+  click_limit_monthly integer,
+  tracking_enabled boolean,
+  landing_enabled boolean,
+  global_background_url text,
+  limit_behavior text
+)
+language sql
+security definer
+set search_path = public
+as $$
+  with settings as (
+    select
+      s.plan,
+      s.click_limit_monthly,
+      s.tracking_enabled,
+      s.landing_enabled,
+      s.global_background_url,
+      s.limit_behavior
+    from public.admin_settings s
+    order by s.id asc
+    limit 1
+  )
+  select
+    coalesce((select plan from settings), 'free')::text as plan,
+    coalesce((select click_limit_monthly from settings), 10000)::integer as click_limit_monthly,
+    coalesce((select tracking_enabled from settings), true)::boolean as tracking_enabled,
+    coalesce((select landing_enabled from settings), false)::boolean as landing_enabled,
+    nullif((select global_background_url from settings), '')::text as global_background_url,
+    coalesce((select limit_behavior from settings), 'drop')::text as limit_behavior;
+$$;
+
+drop function if exists public.list_short_links_with_stats(integer, integer);
+create or replace function public.list_short_links_with_stats(p_limit integer default 25, p_offset integer default 0)
+returns table (
+  id uuid,
+  slug text,
+  destination_url text,
+  created_at timestamptz,
+  is_favorite boolean,
+  tags text[],
+  redirect_type integer,
+  clicks_received bigint,
+  clicks_today bigint,
+  last_click_at timestamptz
+)
+language sql
+security definer
+set search_path = public
+as $$
+  with bounds as (
+    select greatest(coalesce(p_limit, 25), 1) as page_limit, greatest(coalesce(p_offset, 0), 0) as page_offset
+  ),
+  paged as (
+    select
+      sl.id,
+      sl.slug,
+      sl.destination_url,
+      sl.created_at,
+      sl.is_favorite,
+      sl.tags,
+      sl.redirect_type
+    from public.short_links sl
+    where sl.is_active = true
+    order by sl.created_at desc
+    limit (select page_limit from bounds)
+    offset (select page_offset from bounds)
+  ),
+  aggregated as (
+    select
+      ce.link_id,
+      count(*) filter (
+        where ce.event_type = 'redirect'
+          and ce.traffic_category = 'human'
+          and ce.request_method = 'GET'
+      )::bigint as clicks_received,
+      count(*) filter (
+        where ce.event_type = 'redirect'
+          and ce.traffic_category = 'human'
+          and ce.request_method = 'GET'
+          and ce.created_at >= date_trunc('day', now())
+      )::bigint as clicks_today,
+      max(ce.created_at) filter (
+        where ce.event_type = 'redirect'
+          and ce.traffic_category = 'human'
+          and ce.request_method = 'GET'
+      ) as last_click_at
+    from public.click_events ce
+    where ce.link_id in (select p.id from paged p)
+    group by ce.link_id
+  )
+  select
+    p.id,
+    p.slug,
+    p.destination_url,
+    p.created_at,
+    p.is_favorite,
+    p.tags,
+    p.redirect_type,
+    coalesce(a.clicks_received, 0)::bigint as clicks_received,
+    coalesce(a.clicks_today, 0)::bigint as clicks_today,
+    a.last_click_at
+  from paged p
+  left join aggregated a on a.link_id = p.id
+  order by p.created_at desc;
+$$;
+
+drop function if exists public.get_link_overview(uuid);
+create or replace function public.get_link_overview(p_link_id uuid)
+returns table (
+  total_clicks bigint,
+  qr_scans bigint,
+  clicks_today bigint,
+  last_click_at timestamptz,
+  unique_clicks bigint,
+  non_unique_clicks bigint,
+  visits bigint,
+  landing_views bigint,
+  human_clicks bigint,
+  redirects bigint,
+  direct_redirects bigint,
+  bot_hits bigint,
+  prefetch_hits bigint
+)
+language sql
+security definer
+set search_path = public
+as $$
+  select
+    count(*) filter (
+      where ce.event_type = 'redirect'
+        and ce.traffic_category = 'human'
+        and ce.request_method = 'GET'
+    )::bigint as total_clicks,
+    0::bigint as qr_scans,
+    count(*) filter (
+      where ce.event_type = 'redirect'
+        and ce.traffic_category = 'human'
+        and ce.request_method = 'GET'
+        and ce.created_at >= date_trunc('day', now())
+    )::bigint as clicks_today,
+    max(ce.created_at) filter (
+      where ce.event_type = 'redirect'
+        and ce.traffic_category = 'human'
+        and ce.request_method = 'GET'
+    ) as last_click_at,
+    count(*) filter (
+      where ce.event_type = 'redirect'
+        and ce.traffic_category = 'human'
+        and ce.request_method = 'GET'
+        and ce.is_unique = true
+    )::bigint as unique_clicks,
+    count(*) filter (
+      where ce.event_type = 'redirect'
+        and ce.traffic_category = 'human'
+        and ce.request_method = 'GET'
+        and ce.is_unique = false
+    )::bigint as non_unique_clicks,
+    count(*) filter (where ce.event_type = 'visit')::bigint as visits,
+    count(*) filter (where ce.event_type = 'landing_view')::bigint as landing_views,
+    count(*) filter (where ce.event_type = 'human_click')::bigint as human_clicks,
+    count(*) filter (
+      where ce.event_type = 'redirect'
+        and ce.traffic_category = 'human'
+        and ce.request_method = 'GET'
+    )::bigint as redirects,
+    count(*) filter (
+      where ce.event_type = 'redirect'
+        and ce.traffic_category = 'human'
+        and ce.request_method = 'GET'
+        and coalesce(ce.metadata->>'redirect_path', '') = 'direct'
+    )::bigint as direct_redirects,
+    count(*) filter (where ce.traffic_category = 'bot')::bigint as bot_hits,
+    count(*) filter (where ce.traffic_category = 'prefetch')::bigint as prefetch_hits
+  from public.click_events ce
+  where ce.link_id = p_link_id;
+$$;
+
+create or replace function public.current_month_clicks()
+returns table (total_clicks bigint)
+language sql
+security definer
+set search_path = public
+as $$
+  select count(*)::bigint as total_clicks
+  from public.click_events ce
+  where ce.created_at >= date_trunc('month', now())
+    and ce.created_at < (date_trunc('month', now()) + interval '1 month')
+    and ce.event_type = 'redirect'
+    and ce.traffic_category = 'human'
+    and ce.request_method = 'GET';
+$$;
+
+create or replace function public.get_link_timeseries(
+  p_link_id uuid,
+  p_granularity text default 'days',
+  p_points integer default 30
+)
+returns table (
+  bucket_at timestamptz,
+  label text,
+  clicks bigint
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_granularity text := lower(coalesce(p_granularity, 'days'));
+  v_points integer := greatest(coalesce(p_points, 30), 1);
+  v_start timestamptz;
+  v_end timestamptz;
+  v_step interval;
+  v_label_format text;
+  v_trunc text;
+begin
+  if v_granularity = 'hours' then
+    v_trunc := 'hour';
+    v_step := interval '1 hour';
+    v_end := date_trunc('hour', now());
+    v_start := v_end - make_interval(hours => (v_points - 1));
+    v_label_format := 'HH24:00';
+  elsif v_granularity = 'months' then
+    v_trunc := 'month';
+    v_step := interval '1 month';
+    v_end := date_trunc('month', now());
+    v_start := v_end - make_interval(months => (v_points - 1));
+    v_label_format := 'YYYY-MM';
+  else
+    v_trunc := 'day';
+    v_step := interval '1 day';
+    v_end := date_trunc('day', now());
+    v_start := v_end - make_interval(days => (v_points - 1));
+    v_label_format := 'MM-DD';
+  end if;
+
+  return query
+  with series as (
+    select generate_series(v_start, v_end, v_step) as bucket
+  ),
+  agg as (
+    select
+      date_trunc(v_trunc, ce.created_at) as bucket,
+      count(*)::bigint as clicks
+    from public.click_events ce
+    where ce.link_id = p_link_id
+      and ce.created_at >= v_start
+      and ce.created_at < (v_end + v_step)
+      and ce.event_type = 'redirect'
+      and ce.traffic_category = 'human'
+      and ce.request_method = 'GET'
+    group by 1
+  )
+  select
+    s.bucket::timestamptz as bucket_at,
+    to_char(s.bucket, v_label_format) as label,
+    coalesce(a.clicks, 0)::bigint as clicks
+  from series s
+  left join agg a on a.bucket = s.bucket
+  order by s.bucket asc;
+end;
+$$;
+
+create or replace function public.get_link_top_dimension(
+  p_link_id uuid,
+  p_dimension text,
+  p_limit integer default 10
+)
+returns table (
+  label text,
+  clicks bigint
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_dimension text := lower(coalesce(p_dimension, ''));
+  v_limit integer := greatest(coalesce(p_limit, 10), 1);
+begin
+  return query
+  select
+    case v_dimension
+      when 'country' then coalesce(nullif(upper(ce.country), ''), 'UNK')
+      when 'region' then coalesce(nullif(ce.region, ''), 'unknown')
+      when 'city' then coalesce(nullif(ce.city, ''), 'unknown')
+      when 'source' then coalesce(nullif(ce.source, ''), 'direct')
+      when 'browser' then coalesce(nullif(ce.browser, ''), 'unknown')
+      when 'device' then coalesce(nullif(ce.device, ''), 'unknown')
+      when 'os' then coalesce(nullif(ce.os, ''), 'unknown')
+      when 'language' then coalesce(nullif(ce.language, ''), 'unknown')
+      when 'platform' then coalesce(nullif(ce.platform, ''), 'unknown')
+      when 'social' then
+        case
+          when lower(coalesce(ce.source, '')) in ('facebook', 'instagram', 'tiktok', 'twitter', 'x', 'linkedin', 'youtube', 'reddit', 'snapchat', 'pinterest')
+            then lower(ce.source)
+          else 'other'
+        end
+      else 'unknown'
+    end as label,
+    count(*)::bigint as clicks
+  from public.click_events ce
+  where ce.link_id = p_link_id
+    and ce.event_type = 'redirect'
+    and ce.traffic_category = 'human'
+    and ce.request_method = 'GET'
+  group by 1
+  order by clicks desc, label asc
+  limit v_limit;
+end;
+$$;
+
+create or replace function public.get_link_day_breakdown(p_link_id uuid)
+returns table (
+  label text,
+  clicks bigint
+)
+language sql
+security definer
+set search_path = public
+as $$
+  with days as (
+    select * from (values
+      (0, 'Sun'),
+      (1, 'Mon'),
+      (2, 'Tue'),
+      (3, 'Wed'),
+      (4, 'Thu'),
+      (5, 'Fri'),
+      (6, 'Sat')
+    ) as d(dow, label)
+  ),
+  agg as (
+    select
+      extract(dow from ce.created_at)::integer as dow,
+      count(*)::bigint as clicks
+    from public.click_events ce
+    where ce.link_id = p_link_id
+      and ce.event_type = 'redirect'
+      and ce.traffic_category = 'human'
+      and ce.request_method = 'GET'
+    group by 1
+  )
+  select
+    d.label,
+    coalesce(a.clicks, 0)::bigint as clicks
+  from days d
+  left join agg a on a.dow = d.dow
+  order by d.dow asc;
+$$;
+
+create or replace function public.get_link_hour_breakdown(p_link_id uuid)
+returns table (
+  label text,
+  clicks bigint
+)
+language sql
+security definer
+set search_path = public
+as $$
+  with hours as (
+    select generate_series(0, 23) as hour_num
+  ),
+  agg as (
+    select
+      extract(hour from ce.created_at)::integer as hour_num,
+      count(*)::bigint as clicks
+    from public.click_events ce
+    where ce.link_id = p_link_id
+      and ce.event_type = 'redirect'
+      and ce.traffic_category = 'human'
+      and ce.request_method = 'GET'
+    group by 1
+  )
+  select
+    lpad(h.hour_num::text, 2, '0') || ':00' as label,
+    coalesce(a.clicks, 0)::bigint as clicks
+  from hours h
+  left join agg a on a.hour_num = h.hour_num
+  order by h.hour_num asc;
+$$;
+
+revoke all on function public.get_admin_settings() from public, anon, authenticated;
+grant execute on function public.get_admin_settings() to service_role;
+
+revoke all on function public.list_short_links_with_stats(integer, integer) from public, anon, authenticated;
+grant execute on function public.list_short_links_with_stats(integer, integer) to service_role;
+
+revoke all on function public.get_link_overview(uuid) from public, anon, authenticated;
+grant execute on function public.get_link_overview(uuid) to service_role;
+
+revoke all on function public.current_month_clicks() from public, anon, authenticated;
+grant execute on function public.current_month_clicks() to service_role;
+
+revoke all on function public.get_link_timeseries(uuid, text, integer) from public, anon, authenticated;
+grant execute on function public.get_link_timeseries(uuid, text, integer) to service_role;
+
+revoke all on function public.get_link_top_dimension(uuid, text, integer) from public, anon, authenticated;
+grant execute on function public.get_link_top_dimension(uuid, text, integer) to service_role;
+
+revoke all on function public.get_link_day_breakdown(uuid) from public, anon, authenticated;
+grant execute on function public.get_link_day_breakdown(uuid) to service_role;
+
+revoke all on function public.get_link_hour_breakdown(uuid) from public, anon, authenticated;
+grant execute on function public.get_link_hour_breakdown(uuid) to service_role;

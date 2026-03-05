@@ -48,7 +48,9 @@ export async function PATCH(request: NextRequest) {
 
   try {
     await updateAdminSettings({
-      trackingEnabled: parsed.data.tracking_enabled
+      trackingEnabled: parsed.data.tracking_enabled,
+      landingEnabled: parsed.data.landing_enabled,
+      globalBackgroundUrl: parsed.data.global_background_url
     });
     const settings = await getAdminSettings();
     return NextResponse.json({ settings });

@@ -94,13 +94,16 @@ const rebrandlyWords = {
     hours: "Heures",
     days: "Jours",
     months: "Mois",
-    totalClicks: "Clics totaux",
+    totalClicks: "Redirects (humains)",
     qrScans: "Scans QR",
     clicksToday: "Clics aujourd'hui",
     lastClick: "Dernier clic",
     noLastClick: "Aucune donnee",
     geoDistribution: "Repartition geographique",
     clickType: "Type de clic",
+    uniqueSplit: "Redirects humains: uniques vs non-uniques",
+    uniqueHuman: "Uniques (humains)",
+    nonUniqueHuman: "Non-uniques (humains)",
     topCities: "Top villes",
     topRegions: "Top regions",
     topDays: "Top jours",
@@ -124,13 +127,16 @@ const rebrandlyWords = {
     hours: "Hours",
     days: "Days",
     months: "Months",
-    totalClicks: "Total clicks",
+    totalClicks: "Redirects (human)",
     qrScans: "QR scans",
     clicksToday: "Clicks today",
     lastClick: "Last click",
     noLastClick: "No data",
     geoDistribution: "Geographic distribution",
     clickType: "Click type",
+    uniqueSplit: "Human redirects: unique vs non-unique",
+    uniqueHuman: "Unique (human)",
+    nonUniqueHuman: "Non-unique (human)",
     topCities: "Top cities",
     topRegions: "Top regions",
     topDays: "Top days",
@@ -169,6 +175,42 @@ function formatPercent(value: number, lang: AdminLang): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   }).format(value);
+}
+
+function normalizeHourLabel24(label: string): string {
+  const raw = label.trim();
+  if (!raw) return label;
+
+  const ampmMatch = raw.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i);
+  if (ampmMatch) {
+    const hour12 = Number(ampmMatch[1]);
+    const minute = ampmMatch[2] ?? "00";
+    const marker = ampmMatch[3].toLowerCase();
+    if (Number.isFinite(hour12) && hour12 >= 1 && hour12 <= 12) {
+      let hour24 = hour12 % 12;
+      if (marker === "pm") hour24 += 12;
+      return `${String(hour24).padStart(2, "0")}:${minute}`;
+    }
+  }
+
+  const hourOnly = raw.match(/^(\d{1,2})$/);
+  if (hourOnly) {
+    const hour = Number(hourOnly[1]);
+    if (Number.isFinite(hour) && hour >= 0 && hour <= 23) {
+      return `${String(hour).padStart(2, "0")}:00`;
+    }
+  }
+
+  const hourMinute = raw.match(/^(\d{1,2}):(\d{2})$/);
+  if (hourMinute) {
+    const hour = Number(hourMinute[1]);
+    const minute = hourMinute[2];
+    if (Number.isFinite(hour) && hour >= 0 && hour <= 23) {
+      return `${String(hour).padStart(2, "0")}:${minute}`;
+    }
+  }
+
+  return label;
 }
 
 function normalizeCountryCode(input: string): string | null {
@@ -526,9 +568,18 @@ function RebrandlyCharts(props: RebrandlyChartsProps) {
   const activeSeries =
     granularity === "hours" ? props.timeseries.hours : granularity === "months" ? props.timeseries.months : props.timeseries.days;
 
+  const popularHours24 = useMemo(
+    () =>
+      props.popularHours.map((entry) => ({
+        ...entry,
+        label: normalizeHourLabel24(entry.label)
+      })),
+    [props.popularHours]
+  );
+
   const performanceData = useMemo(
     () => ({
-      labels: activeSeries.map((point) => point.label),
+      labels: activeSeries.map((point) => (granularity === "hours" ? normalizeHourLabel24(point.label) : point.label)),
       datasets: [
         {
           label: copy.clicks,
@@ -541,7 +592,7 @@ function RebrandlyCharts(props: RebrandlyChartsProps) {
         }
       ]
     }),
-    [activeSeries, copy.clicks]
+    [activeSeries, copy.clicks, granularity]
   );
 
   const clickTypeData = useMemo(
@@ -550,12 +601,26 @@ function RebrandlyCharts(props: RebrandlyChartsProps) {
       datasets: [
         {
           data: props.clickType.map((entry) => entry.clicks),
-          backgroundColor: ["#f87171", "#374151", "#fb923c", "#60a5fa"],
+          backgroundColor: ["#f87171", "#fb923c", "#60a5fa", "#22c55e", "#facc15", "#a78bfa"],
           borderWidth: 0
         }
       ]
     }),
     [props.clickType]
+  );
+
+  const uniqueSplitData = useMemo(
+    () => ({
+      labels: [copy.uniqueHuman, copy.nonUniqueHuman],
+      datasets: [
+        {
+          data: [props.overview.uniqueClicks, props.overview.nonUniqueClicks],
+          backgroundColor: ["#22c55e", "#f97316"],
+          borderWidth: 0
+        }
+      ]
+    }),
+    [copy.nonUniqueHuman, copy.uniqueHuman, props.overview.nonUniqueClicks, props.overview.uniqueClicks]
   );
 
   return (
@@ -636,7 +701,7 @@ function RebrandlyCharts(props: RebrandlyChartsProps) {
       <ListCard title={copy.topCities} data={props.topCities} lang={props.lang} />
       <ListCard title={copy.topRegions} data={props.topRegions} lang={props.lang} />
       <ListCard title={copy.topDays} data={props.topDays} lang={props.lang} />
-      <ListCard title={copy.popularHours} data={props.popularHours} lang={props.lang} />
+      <ListCard title={copy.popularHours} data={popularHours24} lang={props.lang} />
 
       <article className="rb-panel rb-analytics-card">
         <h3>{copy.clickType}</h3>
@@ -644,6 +709,28 @@ function RebrandlyCharts(props: RebrandlyChartsProps) {
           <div className="rb-chart-box rb-chart-box-sm">
             <Doughnut
               data={clickTypeData}
+              options={{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                  legend: {
+                    labels: {
+                      color: "#d1d5db"
+                    }
+                  }
+                }
+              }}
+            />
+          </div>
+        </div>
+      </article>
+
+      <article className="rb-panel rb-analytics-card">
+        <h3>{copy.uniqueSplit}</h3>
+        <div className="rb-click-type-chart">
+          <div className="rb-chart-box rb-chart-box-sm">
+            <Doughnut
+              data={uniqueSplitData}
               options={{
                 responsive: true,
                 maintainAspectRatio: false,
@@ -693,7 +780,7 @@ function LegacyCharts(props: LegacyChartsProps) {
 
   const hourlyData = useMemo(
     () => ({
-      labels: props.hourly.map((point) => point.hour),
+      labels: props.hourly.map((point) => normalizeHourLabel24(point.hour)),
       datasets: [
         {
           label: "Clicks by hour",
