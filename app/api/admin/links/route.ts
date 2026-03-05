@@ -17,14 +17,19 @@ export async function GET(request: NextRequest) {
 
   const page = Number(request.nextUrl.searchParams.get("page") ?? "1");
   const pageSize = Number(request.nextUrl.searchParams.get("pageSize") ?? "20");
+  const includeAnalytics = request.nextUrl.searchParams.get("includeAnalytics") === "1";
 
   try {
-    const [links, globalAnalytics, settings] = await Promise.all([
+    const [links, settings, globalAnalytics] = await Promise.all([
       listShortLinksWithStats(page, pageSize),
-      getGlobalAnalyticsData(),
-      getAdminSettings()
+      getAdminSettings(),
+      includeAnalytics ? getGlobalAnalyticsData() : Promise.resolve(null)
     ]);
-    return NextResponse.json({ links, globalAnalytics, settings });
+    return NextResponse.json({
+      links,
+      settings,
+      ...(globalAnalytics ? { globalAnalytics } : {})
+    });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to list short links" },
