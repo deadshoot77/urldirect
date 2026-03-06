@@ -316,8 +316,9 @@ const DEFAULT_ANALYTICS_TIME_ZONE = "Europe/Paris";
 const DEFAULT_ANALYTICS_RANGE: AnalyticsRange = "today";
 const GLOBAL_ANALYTICS_BATCH_SIZE = 500;
 const LIST_STATS_RPC_BACKOFF_MS = 5 * 60_000;
-const LIST_STATS_RPC_TIMEOUT_MS = 8_000;
-const LINK_ANALYTICS_RPC_TIMEOUT_MS = 4_000;
+const LIST_STATS_RPC_TIMEOUT_MS = 12_000;
+const LIST_LINK_OVERVIEW_TIMEOUT_MS = 10_000;
+const LINK_ANALYTICS_RPC_TIMEOUT_MS = 12_000;
 const SOCIAL_SOURCES = new Set([
   "facebook",
   "instagram",
@@ -524,6 +525,106 @@ function isHumanRedirectEvent(
   requestMethod: string
 ): boolean {
   return eventType === "redirect" && requestMethod === "GET" && isHumanRedirectTrafficCategory(trafficCategory);
+}
+
+function applyHumanRedirectFilters(query: any): any {
+  return query.eq("event_type", "redirect").eq("request_method", "GET").or("traffic_category.eq.human,traffic_category.eq.unknown,traffic_category.is.null");
+}
+
+async function countLinkEvents(linkId: string, applyFilters: (query: any) => any): Promise<number> {
+  const query = applyFilters(
+    getSupabaseAdminClient().from("click_events").select("id", { head: true, count: "exact" }).eq("link_id", linkId)
+  );
+  const { count, error } = await query;
+  if (error) {
+    throw new Error(`countLinkEvents failed: ${error.message}`);
+  }
+  return toNumber(count ?? 0);
+}
+
+async function getLinkListStatsFromTable(linkId: string): Promise<{
+  clicks_received: number;
+  clicks_today: number;
+  last_click_at: string | null;
+}> {
+  const startOfDayIso = new Date(startOfUtcDay(Date.now())).toISOString();
+  const [clicksReceived, clicksToday, lastClickResult] = await Promise.all([
+    countLinkEvents(linkId, (query) => applyHumanRedirectFilters(query)),
+    countLinkEvents(linkId, (query) => applyHumanRedirectFilters(query).gte("created_at", startOfDayIso)),
+    applyHumanRedirectFilters(
+      getSupabaseAdminClient()
+        .from("click_events")
+        .select("created_at")
+        .eq("link_id", linkId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+    )
+  ]);
+
+  if (lastClickResult.error) {
+    throw new Error(`getLinkListStatsFromTable last click failed: ${lastClickResult.error.message}`);
+  }
+
+  const lastClickAt =
+    Array.isArray(lastClickResult.data) && lastClickResult.data.length > 0
+      ? toStringOrNull(lastClickResult.data[0]?.created_at)
+      : null;
+
+  return {
+    clicks_received: clicksReceived,
+    clicks_today: clicksToday,
+    last_click_at: lastClickAt
+  };
+}
+
+async function getLinkOverviewFromTable(linkId: string): Promise<LinkOverviewStats> {
+  const startOfDayIso = new Date(startOfUtcDay(Date.now())).toISOString();
+  const [redirects, clicksToday, uniqueClicks, nonUniqueClicks, visits, landingViews, humanClicks, botHits, prefetchHits, directRedirects, lastClickResult] =
+    await Promise.all([
+      countLinkEvents(linkId, (query) => applyHumanRedirectFilters(query)),
+      countLinkEvents(linkId, (query) => applyHumanRedirectFilters(query).gte("created_at", startOfDayIso)),
+      countLinkEvents(linkId, (query) => applyHumanRedirectFilters(query).eq("is_unique", true)),
+      countLinkEvents(linkId, (query) => applyHumanRedirectFilters(query).eq("is_unique", false)),
+      countLinkEvents(linkId, (query) => query.eq("event_type", "visit")),
+      countLinkEvents(linkId, (query) => query.eq("event_type", "landing_view")),
+      countLinkEvents(linkId, (query) => query.eq("event_type", "human_click")),
+      countLinkEvents(linkId, (query) => query.eq("traffic_category", "bot")),
+      countLinkEvents(linkId, (query) => query.eq("traffic_category", "prefetch")),
+      countLinkEvents(linkId, (query) => applyHumanRedirectFilters(query).contains("metadata", { redirect_path: "direct" })),
+      applyHumanRedirectFilters(
+        getSupabaseAdminClient()
+          .from("click_events")
+          .select("created_at")
+          .eq("link_id", linkId)
+          .order("created_at", { ascending: false })
+          .limit(1)
+      )
+    ]);
+
+  if (lastClickResult.error) {
+    throw new Error(`getLinkOverviewFromTable last click failed: ${lastClickResult.error.message}`);
+  }
+
+  const lastClickAt =
+    Array.isArray(lastClickResult.data) && lastClickResult.data.length > 0
+      ? toStringOrNull(lastClickResult.data[0]?.created_at)
+      : null;
+
+  return {
+    totalClicks: redirects,
+    qrScans: 0,
+    clicksToday,
+    lastClickAt,
+    uniqueClicks,
+    nonUniqueClicks,
+    visits,
+    landingViews,
+    humanClicks,
+    redirects,
+    directRedirects,
+    botHits,
+    prefetchHits
+  };
 }
 
 export async function getCurrentMonthClicks(): Promise<number> {
@@ -1285,19 +1386,28 @@ async function listShortLinksWithoutRpc(
   const statsByRow = await Promise.all(
     rows.map(async (row) => {
       try {
-        const overview = await withTimeout(getLinkOverview(row.id), 2_500, "get_link_overview(list fallback)");
+        const overview = await withTimeout(
+          getLinkOverview(row.id),
+          LIST_LINK_OVERVIEW_TIMEOUT_MS,
+          "get_link_overview(list fallback)"
+        );
         return {
           clicks_received: overview.redirects,
           clicks_today: overview.clicksToday,
           last_click_at: overview.lastClickAt
         };
       } catch (error) {
-        console.error("listShortLinksWithStats fallback overview failed", error);
-        return {
-          clicks_received: 0,
-          clicks_today: 0,
-          last_click_at: null
-        };
+        console.error("listShortLinksWithStats fallback overview failed; using direct table fallback", error);
+        try {
+          return await getLinkListStatsFromTable(row.id);
+        } catch (fallbackError) {
+          console.error("listShortLinksWithStats direct table fallback failed", fallbackError);
+          return {
+            clicks_received: 0,
+            clicks_today: 0,
+            last_click_at: null
+          };
+        }
       }
     })
   );
@@ -1649,8 +1759,19 @@ export function createEmptyLinkAnalyticsData(): LinkAnalyticsData {
 
 async function getLinkAnalyticsDataViaRpc(linkId: string, timeZone: string): Promise<LinkAnalyticsData> {
   const fallback = createEmptyLinkAnalyticsData();
+  let overview = fallback.overview;
+  try {
+    overview = await withTimeout(getLinkOverview(linkId), LINK_ANALYTICS_RPC_TIMEOUT_MS, "get_link_overview");
+  } catch (error) {
+    console.error("get_link_overview failed; using direct table fallback", error);
+    try {
+      overview = await getLinkOverviewFromTable(linkId);
+    } catch (tableFallbackError) {
+      console.error("get_link_overview direct table fallback failed", tableFallbackError);
+    }
+  }
+
   const [
-    overview,
     hoursSeries,
     daysSeries,
     monthsSeries,
@@ -1666,7 +1787,6 @@ async function getLinkAnalyticsDataViaRpc(linkId: string, timeZone: string): Pro
     topDays,
     popularHours
   ] = await Promise.all([
-    safeLinkAnalyticsCall("get_link_overview", getLinkOverview(linkId), fallback.overview),
     safeLinkAnalyticsCall("get_link_timeseries(hours)", getLinkTimeseries(linkId, "hours", 24), fallback.timeseries.hours),
     safeLinkAnalyticsCall("get_link_timeseries(days)", getLinkTimeseries(linkId, "days", 30), fallback.timeseries.days),
     safeLinkAnalyticsCall("get_link_timeseries(months)", getLinkTimeseries(linkId, "months", 12), fallback.timeseries.months),
@@ -1685,7 +1805,7 @@ async function getLinkAnalyticsDataViaRpc(linkId: string, timeZone: string): Pro
 
   const normalizedOverview: LinkOverviewStats = {
     ...overview,
-    clicksToday: sumCurrentDayClicks(hoursSeries, timeZone)
+    clicksToday: hoursSeries.length > 0 ? sumCurrentDayClicks(hoursSeries, timeZone) : overview.clicksToday
   };
 
   const clickType: LabelCount[] = [
