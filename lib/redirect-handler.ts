@@ -134,6 +134,9 @@ export async function handleRedirectRequest(request: NextRequest, slug: string |
     return handleLegacyRedirectRequest(request, normalizedSlug);
   }
   const activeLink = shortLink;
+  const settingsPromise = getAdminSettings({
+    includeUsage: false
+  });
 
   const userAgent = request.headers.get("user-agent");
   const referer = request.headers.get("referer");
@@ -147,6 +150,10 @@ export async function handleRedirectRequest(request: NextRequest, slug: string |
   const source = parseTrafficSource(referer);
   const uaProfile = parseUserAgent(userAgent);
   const traffic = classifyTraffic(request, userAgent, uaProfile);
+  const uniqueClickPromise =
+    request.method === "GET" && traffic.category === "human"
+      ? isUniqueClick(activeLink.id, ipHash).catch(() => true)
+      : Promise.resolve(true);
   const trackingHeaders = getTrackingHeaders(request);
   const continueRequested = hasContinueSignal(request.nextUrl.searchParams);
   const continueToken = request.nextUrl.searchParams.get("rb_token");
@@ -186,7 +193,7 @@ export async function handleRedirectRequest(request: NextRequest, slug: string |
   };
 
   try {
-    const loaded = await getAdminSettings();
+    const loaded = await settingsPromise;
     settings = {
       trackingEnabled: loaded.trackingEnabled,
       landingEnabled: loaded.landingEnabled,
@@ -266,17 +273,26 @@ export async function handleRedirectRequest(request: NextRequest, slug: string |
     });
   }
 
-  const shouldTrackVisit = !continueRequested && (request.method !== "HEAD" || env.COUNT_HEAD_VISITS);
-  try {
-    if (shouldTrackVisit) {
-      await trackEvent("visit", {
-        metadata: {
-          landing_mode: activeLink.landingMode
-        }
-      });
+  function trackEventNonBlocking(
+    eventType: "visit" | "landing_view" | "human_click" | "redirect",
+    failureMessage: string,
+    options?: {
+      isUnique?: boolean;
+      metadata?: Record<string, unknown>;
     }
-  } catch (error) {
-    console.error("Visit tracking failed", error);
+  ): void {
+    void trackEvent(eventType, options).catch((error) => {
+      console.error(failureMessage, error);
+    });
+  }
+
+  const shouldTrackVisit = !continueRequested && (request.method !== "HEAD" || env.COUNT_HEAD_VISITS);
+  if (shouldTrackVisit) {
+    trackEventNonBlocking("visit", "Visit tracking failed", {
+      metadata: {
+        landing_mode: activeLink.landingMode
+      }
+    });
   }
 
   const shouldDisplayLanding =
@@ -287,15 +303,11 @@ export async function handleRedirectRequest(request: NextRequest, slug: string |
     (!continueRequested || !continueAllowed);
 
   if (shouldDisplayLanding) {
-    try {
-      await trackEvent("landing_view", {
-        metadata: {
-          landing_background: activeLink.backgroundUrl ?? settings.globalBackgroundUrl
-        }
-      });
-    } catch (error) {
-      console.error("Landing view tracking failed", error);
-    }
+    trackEventNonBlocking("landing_view", "Landing view tracking failed", {
+      metadata: {
+        landing_background: activeLink.backgroundUrl ?? settings.globalBackgroundUrl
+      }
+    });
 
     const continueParams = buildContinueSearchParams(request.nextUrl.searchParams);
     const signedContinueToken = signLandingContinueToken({
@@ -332,15 +344,11 @@ export async function handleRedirectRequest(request: NextRequest, slug: string |
     requiresSignedContinue &&
     continueAllowed;
   if (shouldTrackHumanClick) {
-    try {
-      await trackEvent("human_click", {
-        metadata: {
-          landing_mode: activeLink.landingMode
-        }
-      });
-    } catch (error) {
-      console.error("Human click tracking failed", error);
-    }
+    trackEventNonBlocking("human_click", "Human click tracking failed", {
+      metadata: {
+        landing_mode: activeLink.landingMode
+      }
+    });
   }
 
   const passedLandingStep = !requiresSignedContinue || continueRequested;
@@ -348,7 +356,7 @@ export async function handleRedirectRequest(request: NextRequest, slug: string |
     request.method === "GET" && traffic.category === "human" && continueAllowed && passedLandingStep;
   if (isRedirectEventEligible) {
     try {
-      const unique = await isUniqueClick(activeLink.id, ipHash).catch(() => true);
+      const unique = await uniqueClickPromise;
       await trackEvent("redirect", {
         isUnique: unique,
         metadata: {

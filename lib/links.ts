@@ -56,6 +56,10 @@ interface SettingsRow {
   limit_behavior: TrackingLimitBehavior;
 }
 
+interface GetAdminSettingsOptions {
+  includeUsage?: boolean;
+}
+
 interface OverviewRow {
   total_clicks: number;
   qr_scans: number;
@@ -294,6 +298,7 @@ interface AggregatedGlobalAnalyticsData {
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+const ADMIN_SETTINGS_CACHE_TTL_MS = 60_000;
 const SOCIAL_SOURCES = new Set([
   "facebook",
   "instagram",
@@ -306,6 +311,16 @@ const SOCIAL_SOURCES = new Set([
   "snapchat",
   "pinterest"
 ]);
+
+let cachedRuntimeAdminSettings:
+  | {
+      trackingEnabled: boolean;
+      landingEnabled: boolean;
+      globalBackgroundUrl: string | null;
+      limitBehavior: TrackingLimitBehavior;
+      expiresAt: number;
+    }
+  | null = null;
 
 function toNumber(value: unknown): number {
   if (typeof value === "number") return value;
@@ -466,7 +481,23 @@ export async function getCurrentMonthClicks(): Promise<number> {
   return toNumber(rows[0]?.total_clicks);
 }
 
-export async function getAdminSettings(): Promise<AdminSettings> {
+export async function getAdminSettings(options?: GetAdminSettingsOptions): Promise<AdminSettings> {
+  const includeUsage = options?.includeUsage ?? true;
+  const nowMs = Date.now();
+
+  if (!includeUsage && cachedRuntimeAdminSettings && cachedRuntimeAdminSettings.expiresAt > nowMs) {
+    return {
+      plan: "pro",
+      clickLimitMonthly: Number.MAX_SAFE_INTEGER,
+      trackingEnabled: cachedRuntimeAdminSettings.trackingEnabled,
+      landingEnabled: cachedRuntimeAdminSettings.landingEnabled,
+      globalBackgroundUrl: cachedRuntimeAdminSettings.globalBackgroundUrl,
+      limitBehavior: cachedRuntimeAdminSettings.limitBehavior,
+      usageThisMonth: 0,
+      limitReached: false
+    };
+  }
+
   let row: SettingsRow | undefined;
   try {
     const rows = await runRpcList<SettingsRow>("get_admin_settings");
@@ -475,11 +506,22 @@ export async function getAdminSettings(): Promise<AdminSettings> {
     row = undefined;
   }
 
-  const usageThisMonth = await getCurrentMonthClicks().catch(() => 0);
   const trackingEnabled = row?.tracking_enabled ?? env.TRACKING_ENABLED_DEFAULT;
   const landingEnabled = row?.landing_enabled ?? false;
   const globalBackgroundUrl = toStringOrNull(row?.global_background_url);
   const limitBehavior = normalizeLimitBehavior(row?.limit_behavior);
+
+  if (!includeUsage) {
+    cachedRuntimeAdminSettings = {
+      trackingEnabled,
+      landingEnabled,
+      globalBackgroundUrl,
+      limitBehavior,
+      expiresAt: nowMs + ADMIN_SETTINGS_CACHE_TTL_MS
+    };
+  }
+
+  const usageThisMonth = includeUsage ? await getCurrentMonthClicks().catch(() => 0) : 0;
 
   return {
     plan: "pro",
