@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import AdminCharts from "@/components/admin-charts";
+import ChartErrorBoundary from "@/components/chart-error-boundary";
 import AdminLanguageToggle from "@/components/admin-language-toggle";
 import LogoutButton from "@/components/logout-button";
 import TopToast, { type TopToastKind, type TopToastState } from "@/components/top-toast";
@@ -25,6 +26,11 @@ interface NewLinkFormState {
   destination_url: string;
   tags: string;
   redirect_type: 301 | 302;
+}
+
+interface LinkListStat {
+  clicksReceived: number;
+  lastClickAt: string | null;
 }
 
 const words = {
@@ -110,7 +116,8 @@ const words = {
     copiedPrefix: "Copie",
     never: "Jamais",
     clicks: "redirections humaines",
-    zeroStatsHint: "Stats a 0: verifie tracking actif + migration SQL a jour (db/migrations.sql)."
+    zeroStatsHint: "Stats a 0: verifie tracking actif + migration SQL a jour (db/migrations.sql).",
+    chartsUnavailable: "Impossible d'afficher ce graphique pour le moment."
   },
   en: {
     admin: "Admin",
@@ -194,7 +201,8 @@ const words = {
     copiedPrefix: "Copied",
     never: "Never",
     clicks: "human redirects",
-    zeroStatsHint: "Zero stats: verify tracking enabled and latest SQL migration applied (db/migrations.sql)."
+    zeroStatsHint: "Zero stats: verify tracking enabled and latest SQL migration applied (db/migrations.sql).",
+    chartsUnavailable: "Unable to render this chart right now."
   }
 } as const;
 
@@ -272,6 +280,7 @@ export default function AdminLinksPageClient({
   const [globalAnalyticsLoaded, setGlobalAnalyticsLoaded] = useState(initialGlobalAnalyticsLoaded);
   const [settings, setSettings] = useState<AdminSettings>(initialSettings);
   const [linkAnalytics, setLinkAnalytics] = useState<Record<string, LinkAnalyticsData>>({});
+  const [linkListStats, setLinkListStats] = useState<Record<string, LinkListStat>>({});
   const [activeLinkStats, setActiveLinkStats] = useState<{
     id: string;
     slug: string;
@@ -320,6 +329,55 @@ export default function AdminLinksPageClient({
     }
     void refresh(links.page, { includeAnalytics: true, silent: globalAnalyticsLoaded, analyticsRange });
   }, [activeSection, analyticsRange, globalAnalyticsLoaded, loadedAnalyticsRange, loadingAnalyticsData, links.page]);
+
+  useEffect(() => {
+    if (links.items.length === 0) {
+      return;
+    }
+
+    const missingIds = links.items.map((link) => link.id).filter((id) => !linkListStats[id]);
+    if (missingIds.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadVisibleLinkStats() {
+      try {
+        const response = await fetch(`/api/admin/links/stats?ids=${encodeURIComponent(missingIds.join(","))}`, {
+          cache: "no-store",
+          credentials: "include"
+        });
+        const payload = (await response.json().catch(() => null)) as
+          | {
+              stats?: Record<string, LinkListStat>;
+              error?: string;
+            }
+          | null;
+
+        if (!response.ok || !payload?.stats) {
+          throw new Error(toErrorMessage(payload, "Failed to load link stats"));
+        }
+
+        if (!cancelled) {
+          setLinkListStats((current) => ({
+            ...current,
+            ...payload.stats
+          }));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error("visible link stats fallback", error);
+        }
+      }
+    }
+
+    void loadVisibleLinkStats();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [linkListStats, links.items]);
 
   useEffect(() => {
     if (activeSection !== "analytics" || globalAnalyticsLoaded) {
@@ -399,6 +457,14 @@ export default function AdminLinksPageClient({
     globalAnalytics.overview.prefetchHits;
 
   const activeLinkAnalytics = activeLinkStats ? linkAnalytics[activeLinkStats.id] : null;
+
+  function formatLinkClicks(linkId: string, fallbackValue: number): string {
+    const loaded = linkListStats[linkId];
+    if (!loaded) {
+      return "...";
+    }
+    return formatNumber(loaded.clicksReceived ?? fallbackValue, lang);
+  }
 
   function showToast(message: string, kind: TopToastKind = "info") {
     setToasts((current) => {
@@ -648,6 +714,11 @@ export default function AdminLinksPageClient({
         delete next[linkId];
         return next;
       });
+      setLinkListStats((current) => {
+        const next = { ...current };
+        delete next[linkId];
+        return next;
+      });
       await refresh(links.page, { includeAnalytics: false });
       showToast(copy.deletedLink, "success");
     } catch (error) {
@@ -748,24 +819,26 @@ export default function AdminLinksPageClient({
                 </article>
               ))}
             </div>
-            <AdminCharts
-              mode="rebrandly"
-              lang={lang}
-              overview={globalAnalytics.overview}
-              timeseries={globalAnalytics.timeseries}
-              worldMap={globalAnalytics.worldMap}
-              topCities={globalAnalytics.topCities}
-              topRegions={globalAnalytics.topRegions}
-              topDays={globalAnalytics.topDays}
-              popularHours={globalAnalytics.popularHours}
-              clickType={globalAnalytics.clickType}
-              topSocialPlatforms={globalAnalytics.topSocialPlatforms}
-              topSources={globalAnalytics.topSources}
-              topBrowsers={globalAnalytics.topBrowsers}
-              topDevices={globalAnalytics.topDevices}
-              topLanguages={globalAnalytics.topLanguages}
-              topPlatforms={globalAnalytics.topPlatforms}
-            />
+            <ChartErrorBoundary fallbackMessage={copy.chartsUnavailable}>
+              <AdminCharts
+                mode="rebrandly"
+                lang={lang}
+                overview={globalAnalytics.overview}
+                timeseries={globalAnalytics.timeseries}
+                worldMap={globalAnalytics.worldMap}
+                topCities={globalAnalytics.topCities}
+                topRegions={globalAnalytics.topRegions}
+                topDays={globalAnalytics.topDays}
+                popularHours={globalAnalytics.popularHours}
+                clickType={globalAnalytics.clickType}
+                topSocialPlatforms={globalAnalytics.topSocialPlatforms}
+                topSources={globalAnalytics.topSources}
+                topBrowsers={globalAnalytics.topBrowsers}
+                topDevices={globalAnalytics.topDevices}
+                topLanguages={globalAnalytics.topLanguages}
+                topPlatforms={globalAnalytics.topPlatforms}
+              />
+            </ChartErrorBoundary>
             <div className="rb-report-grid rb-global-lists">
               <StatsList title={copy.topLinks} items={globalAnalytics.topLinks} lang={lang} />
             </div>
@@ -941,7 +1014,7 @@ export default function AdminLinksPageClient({
                           ) : null}
                         </td>
                         <td className="rb-cell-url">{link.destinationUrl}</td>
-                        <td>{formatNumber(link.clicksReceived, lang)}</td>
+                        <td>{formatLinkClicks(link.id, link.clicksReceived)}</td>
                         <td>{formatDate(link.createdAt, lang)}</td>
                         <td>
                           <div className="rb-actions">
@@ -984,7 +1057,7 @@ export default function AdminLinksPageClient({
                   </div>
                   <p className="rb-card-url">{link.destinationUrl}</p>
                   <p className="rb-card-meta">
-                    {formatNumber(link.clicksReceived, lang)} {copy.clicks}
+                    {formatLinkClicks(link.id, link.clicksReceived)} {copy.clicks}
                   </p>
                   {link.tags.length > 0 ? (
                     <div className="rb-tags">
@@ -1035,24 +1108,26 @@ export default function AdminLinksPageClient({
                   </div>
                 </div>
               ) : activeLinkAnalytics ? (
-                <AdminCharts
-                  mode="rebrandly"
-                  lang={lang}
-                  overview={activeLinkAnalytics.overview}
-                  timeseries={activeLinkAnalytics.timeseries}
-                  worldMap={activeLinkAnalytics.worldMap}
-                  topCities={activeLinkAnalytics.topCities}
-                  topRegions={activeLinkAnalytics.topRegions}
-                  topDays={activeLinkAnalytics.topDays}
-                  popularHours={activeLinkAnalytics.popularHours}
-                  clickType={activeLinkAnalytics.clickType}
-                  topSocialPlatforms={activeLinkAnalytics.topSocialPlatforms}
-                  topSources={activeLinkAnalytics.topSources}
-                  topBrowsers={activeLinkAnalytics.topBrowsers}
-                  topDevices={activeLinkAnalytics.topDevices}
-                  topLanguages={activeLinkAnalytics.topLanguages}
-                  topPlatforms={activeLinkAnalytics.topPlatforms}
-                />
+                <ChartErrorBoundary fallbackMessage={copy.chartsUnavailable}>
+                  <AdminCharts
+                    mode="rebrandly"
+                    lang={lang}
+                    overview={activeLinkAnalytics.overview}
+                    timeseries={activeLinkAnalytics.timeseries}
+                    worldMap={activeLinkAnalytics.worldMap}
+                    topCities={activeLinkAnalytics.topCities}
+                    topRegions={activeLinkAnalytics.topRegions}
+                    topDays={activeLinkAnalytics.topDays}
+                    popularHours={activeLinkAnalytics.popularHours}
+                    clickType={activeLinkAnalytics.clickType}
+                    topSocialPlatforms={activeLinkAnalytics.topSocialPlatforms}
+                    topSources={activeLinkAnalytics.topSources}
+                    topBrowsers={activeLinkAnalytics.topBrowsers}
+                    topDevices={activeLinkAnalytics.topDevices}
+                    topLanguages={activeLinkAnalytics.topLanguages}
+                    topPlatforms={activeLinkAnalytics.topPlatforms}
+                  />
+                </ChartErrorBoundary>
               ) : (
                 <p className="rb-muted">{copy.noData}</p>
               )}

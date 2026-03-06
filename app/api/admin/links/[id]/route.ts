@@ -1,10 +1,17 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isAdminRequest } from "@/lib/auth";
-import { deleteShortLink, getLinkAnalyticsData, getShortLinkById, updateShortLink } from "@/lib/links";
+import {
+  createEmptyLinkAnalyticsData,
+  deleteShortLink,
+  getLinkAnalyticsData,
+  getShortLinkById,
+  updateShortLink
+} from "@/lib/links";
 import { shortLinkPatchSchema } from "@/lib/validation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+const LINK_ANALYTICS_TIMEOUT_MS = 8_000;
 
 interface Params {
   params: Promise<{
@@ -14,6 +21,21 @@ interface Params {
 
 function unauthorized() {
   return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+}
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([operation, timeoutPromise]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
 }
 
 export async function GET(request: NextRequest, { params }: Params) {
@@ -35,7 +57,14 @@ export async function GET(request: NextRequest, { params }: Params) {
       return NextResponse.json({ link });
     }
 
-    const analytics = await getLinkAnalyticsData(resolved.id, timeZone);
+    const analytics = await withTimeout(
+      getLinkAnalyticsData(resolved.id, timeZone),
+      LINK_ANALYTICS_TIMEOUT_MS,
+      "getLinkAnalyticsData"
+    ).catch((error) => {
+      console.error("link analytics route fallback", error);
+      return createEmptyLinkAnalyticsData();
+    });
     return NextResponse.json({ link, analytics });
   } catch (error) {
     return NextResponse.json(

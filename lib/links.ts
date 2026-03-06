@@ -314,10 +314,14 @@ const DAY_MS = 24 * HOUR_MS;
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 const ADMIN_SETTINGS_CACHE_TTL_MS = 60_000;
 const GLOBAL_ANALYTICS_CACHE_TTL_MS = 30_000;
+const LINK_LIST_STATS_CACHE_TTL_MS = 30_000;
+const LINK_ANALYTICS_CACHE_TTL_MS = 30_000;
 const DEFAULT_ANALYTICS_TIME_ZONE = "Europe/Paris";
 const DEFAULT_ANALYTICS_RANGE: AnalyticsRange = "today";
 const GLOBAL_ANALYTICS_BATCH_SIZE = 1000;
 const CLICK_EVENTS_SCAN_BATCH_SIZE = 1000;
+const LINK_ANALYTICS_QUERY_TIMEOUT_MS = 7_000;
+const LINK_ANALYTICS_OPTIONAL_COUNT_TIMEOUT_MS = 1_500;
 const SOCIAL_SOURCES = new Set([
   "facebook",
   "instagram",
@@ -348,6 +352,21 @@ let cachedRuntimeGlobalAnalytics:
       range: AnalyticsRange;
     }
   | null = null;
+const cachedRuntimeLinkListStats = new Map<
+  string,
+  {
+    clicksReceived: number;
+    lastClickAt: string | null;
+    expiresAt: number;
+  }
+>();
+const cachedRuntimeLinkAnalytics = new Map<
+  string,
+  {
+    data: LinkAnalyticsData;
+    expiresAt: number;
+  }
+>();
 
 function toNumber(value: unknown): number {
   if (typeof value === "number") return value;
@@ -1117,6 +1136,111 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: s
   }
 }
 
+async function safeTimed<T>(label: string, operation: Promise<T>, fallback: T, timeoutMs: number): Promise<T> {
+  try {
+    return await withTimeout(operation, timeoutMs, label);
+  } catch (error) {
+    console.error(`${label} fallback`, error);
+    return fallback;
+  }
+}
+
+async function exactCount(query: PromiseLike<{ count: number | null; error: { message: string } | null }>, label: string): Promise<number> {
+  const result = await query;
+  if (result.error) {
+    throw new Error(`${label} failed: ${result.error.message}`);
+  }
+  return toNumber(result.count ?? 0);
+}
+
+function createHumanRedirectCountQuery(linkId: string) {
+  return getSupabaseAdminClient()
+    .from("click_events")
+    .select("id", { head: true, count: "exact" })
+    .eq("link_id", linkId)
+    .eq("event_type", "redirect")
+    .eq("request_method", "GET")
+    .or("traffic_category.eq.human,traffic_category.eq.unknown,traffic_category.is.null");
+}
+
+async function getLinkRedirectSummary(linkId: string): Promise<{
+  clicksReceived: number;
+  lastClickAt: string | null;
+}> {
+  const nowMs = Date.now();
+  const cached = cachedRuntimeLinkListStats.get(linkId);
+  if (cached && cached.expiresAt > nowMs) {
+    return {
+      clicksReceived: cached.clicksReceived,
+      lastClickAt: cached.lastClickAt
+    };
+  }
+
+  const [clicksReceived, lastClickResult] = await Promise.all([
+    exactCount(createHumanRedirectCountQuery(linkId), "countLinkRedirects"),
+    getSupabaseAdminClient()
+      .from("click_events")
+      .select("created_at")
+      .eq("link_id", linkId)
+      .eq("event_type", "redirect")
+      .eq("request_method", "GET")
+      .or("traffic_category.eq.human,traffic_category.eq.unknown,traffic_category.is.null")
+      .order("created_at", { ascending: false })
+      .limit(1)
+  ]);
+
+  if (lastClickResult.error) {
+    throw new Error(`getLinkRedirectSummary last click failed: ${lastClickResult.error.message}`);
+  }
+
+  const lastClickAt =
+    Array.isArray(lastClickResult.data) && lastClickResult.data.length > 0
+      ? toStringOrNull(lastClickResult.data[0]?.created_at)
+      : null;
+
+  cachedRuntimeLinkListStats.set(linkId, {
+    clicksReceived,
+    lastClickAt,
+    expiresAt: nowMs + LINK_LIST_STATS_CACHE_TTL_MS
+  });
+
+  return {
+    clicksReceived,
+    lastClickAt
+  };
+}
+
+export async function getLinksRedirectSummaries(
+  linkIds: string[]
+): Promise<Record<string, { clicksReceived: number; lastClickAt: string | null }>> {
+  const output: Record<string, { clicksReceived: number; lastClickAt: string | null }> = {};
+
+  for (const linkId of linkIds) {
+    try {
+      const summary = await getLinkRedirectSummary(linkId);
+      output[linkId] = summary;
+    } catch (error) {
+      console.error("getLinksRedirectSummaries fallback", { linkId, error });
+      output[linkId] = {
+        clicksReceived: 0,
+        lastClickAt: null
+      };
+    }
+  }
+
+  return output;
+}
+
+function sumCurrentDayClicks(points: TimeSeriesPoint[], timeZone: string): number {
+  const formatter = createDayKeyFormatter(timeZone);
+  const today = toDayKey(Date.now(), formatter);
+  return points.reduce((total, point) => {
+    const bucketMs = Date.parse(point.bucketAt);
+    if (Number.isNaN(bucketMs)) return total;
+    return toDayKey(bucketMs, formatter) === today ? total + toNumber(point.clicks) : total;
+  }, 0);
+}
+
 async function scanClickEvents<T extends ClickEventStatRow>(options: {
   select: string;
   applyFilters?: (query: any) => any;
@@ -1510,6 +1634,44 @@ function mapShortLinkListItem(
   };
 }
 
+export async function listShortLinksPage(page = 1, pageSize = 20): Promise<PaginatedShortLinks> {
+  const safePage = toSafePositiveInt(page, 1);
+  const safeSize = Math.min(100, toSafePositiveInt(pageSize, 20));
+  const offset = (safePage - 1) * safeSize;
+
+  const [{ data, error }, totalResult] = await Promise.all([
+    getSupabaseAdminClient()
+      .from("short_links")
+      .select("id, slug, destination_url, created_at, is_favorite, tags, redirect_type")
+      .eq("is_active", true)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + safeSize - 1),
+    getSupabaseAdminClient().from("short_links").select("id", { head: true, count: "exact" }).eq("is_active", true)
+  ]);
+
+  if (error) {
+    throw new Error(`listShortLinksPage failed: ${error.message}`);
+  }
+
+  const rows = (data ?? []) as ShortLinkListBaseRow[];
+  const total = totalResult.error ? Math.max(offset + rows.length, rows.length) : toNumber(totalResult.count ?? 0);
+
+  return {
+    items: rows.map((row) =>
+      mapShortLinkListItem({
+        ...row,
+        clicks_received: 0,
+        clicks_today: 0,
+        last_click_at: null
+      })
+    ),
+    page: safePage,
+    pageSize: safeSize,
+    total,
+    totalPages: Math.max(1, Math.ceil(total / safeSize))
+  };
+}
+
 async function listShortLinksWithoutRpc(
   safePage: number,
   safeSize: number,
@@ -1828,10 +1990,312 @@ export function createEmptyLinkAnalyticsData(): LinkAnalyticsData {
   };
 }
 
+async function getLastHumanRedirectAt(linkId: string): Promise<string | null> {
+  const result = await getSupabaseAdminClient()
+    .from("click_events")
+    .select("created_at")
+    .eq("link_id", linkId)
+    .eq("event_type", "redirect")
+    .eq("request_method", "GET")
+    .or("traffic_category.eq.human,traffic_category.eq.unknown,traffic_category.is.null")
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (result.error) {
+    throw new Error(`getLastHumanRedirectAt failed: ${result.error.message}`);
+  }
+
+  return Array.isArray(result.data) && result.data.length > 0 ? toStringOrNull(result.data[0]?.created_at) : null;
+}
+
+async function getLinkOverviewViaQueries(linkId: string, timeZone: string): Promise<LinkOverviewStats> {
+  const todayStartIso = new Date(getAnalyticsWindow("today", timeZone).startAtMs).toISOString();
+
+  const redirectsPromise = safeTimed(
+    "count_redirects",
+    exactCount(createHumanRedirectCountQuery(linkId), "count_redirects"),
+    0,
+    LINK_ANALYTICS_QUERY_TIMEOUT_MS
+  );
+  const clicksTodayPromise = safeTimed(
+    "count_redirects_today",
+    exactCount(createHumanRedirectCountQuery(linkId).gte("created_at", todayStartIso), "count_redirects_today"),
+    0,
+    LINK_ANALYTICS_QUERY_TIMEOUT_MS
+  );
+  const uniqueClicksPromise = safeTimed(
+    "count_unique_redirects",
+    exactCount(createHumanRedirectCountQuery(linkId).eq("is_unique", true), "count_unique_redirects"),
+    0,
+    LINK_ANALYTICS_QUERY_TIMEOUT_MS
+  );
+  const nonUniqueClicksPromise = safeTimed(
+    "count_non_unique_redirects",
+    exactCount(createHumanRedirectCountQuery(linkId).eq("is_unique", false), "count_non_unique_redirects"),
+    0,
+    LINK_ANALYTICS_QUERY_TIMEOUT_MS
+  );
+  const lastClickAtPromise = safeTimed(
+    "last_human_redirect",
+    getLastHumanRedirectAt(linkId),
+    null,
+    LINK_ANALYTICS_QUERY_TIMEOUT_MS
+  );
+
+  const directRedirectsPromise = safeTimed(
+    "count_direct_redirects",
+    exactCount(
+      createHumanRedirectCountQuery(linkId).contains("metadata", {
+        redirect_path: "direct"
+      }),
+      "count_direct_redirects"
+    ),
+    0,
+    LINK_ANALYTICS_OPTIONAL_COUNT_TIMEOUT_MS
+  );
+  const visitsPromise = safeTimed(
+    "count_visits",
+    exactCount(
+      getSupabaseAdminClient()
+        .from("click_events")
+        .select("id", { head: true, count: "exact" })
+        .eq("link_id", linkId)
+        .eq("event_type", "visit"),
+      "count_visits"
+    ),
+    0,
+    LINK_ANALYTICS_OPTIONAL_COUNT_TIMEOUT_MS
+  );
+  const landingViewsPromise = safeTimed(
+    "count_landing_views",
+    exactCount(
+      getSupabaseAdminClient()
+        .from("click_events")
+        .select("id", { head: true, count: "exact" })
+        .eq("link_id", linkId)
+        .eq("event_type", "landing_view"),
+      "count_landing_views"
+    ),
+    0,
+    LINK_ANALYTICS_OPTIONAL_COUNT_TIMEOUT_MS
+  );
+  const humanClicksPromise = safeTimed(
+    "count_human_clicks",
+    exactCount(
+      getSupabaseAdminClient()
+        .from("click_events")
+        .select("id", { head: true, count: "exact" })
+        .eq("link_id", linkId)
+        .eq("event_type", "human_click"),
+      "count_human_clicks"
+    ),
+    0,
+    LINK_ANALYTICS_OPTIONAL_COUNT_TIMEOUT_MS
+  );
+  const botHitsPromise = safeTimed(
+    "count_bot_hits",
+    exactCount(
+      getSupabaseAdminClient()
+        .from("click_events")
+        .select("id", { head: true, count: "exact" })
+        .eq("link_id", linkId)
+        .eq("traffic_category", "bot"),
+      "count_bot_hits"
+    ),
+    0,
+    LINK_ANALYTICS_OPTIONAL_COUNT_TIMEOUT_MS
+  );
+  const prefetchHitsPromise = safeTimed(
+    "count_prefetch_hits",
+    exactCount(
+      getSupabaseAdminClient()
+        .from("click_events")
+        .select("id", { head: true, count: "exact" })
+        .eq("link_id", linkId)
+        .eq("traffic_category", "prefetch"),
+      "count_prefetch_hits"
+    ),
+    0,
+    LINK_ANALYTICS_OPTIONAL_COUNT_TIMEOUT_MS
+  );
+
+  const [
+    redirects,
+    clicksToday,
+    uniqueClicks,
+    nonUniqueClicks,
+    lastClickAt,
+    directRedirects,
+    visits,
+    landingViews,
+    humanClicks,
+    botHits,
+    prefetchHits
+  ] = await Promise.all([
+    redirectsPromise,
+    clicksTodayPromise,
+    uniqueClicksPromise,
+    nonUniqueClicksPromise,
+    lastClickAtPromise,
+    directRedirectsPromise,
+    visitsPromise,
+    landingViewsPromise,
+    humanClicksPromise,
+    botHitsPromise,
+    prefetchHitsPromise
+  ]);
+
+  return {
+    totalClicks: redirects,
+    qrScans: 0,
+    clicksToday,
+    lastClickAt,
+    uniqueClicks,
+    nonUniqueClicks,
+    visits,
+    landingViews,
+    humanClicks,
+    redirects,
+    directRedirects,
+    botHits,
+    prefetchHits
+  };
+}
+
+async function getLinkAnalyticsDataViaQueries(linkId: string, timeZone: string): Promise<LinkAnalyticsData> {
+  const cacheKey = `${linkId}:${timeZone}`;
+  const nowMs = Date.now();
+  const cached = cachedRuntimeLinkAnalytics.get(cacheKey);
+  if (cached && cached.expiresAt > nowMs) {
+    return cached.data;
+  }
+
+  const fallback = createEmptyLinkAnalyticsData();
+
+  const [
+    overview,
+    hoursSeries,
+    daysSeries,
+    monthsSeries,
+    topCountries,
+    topCities,
+    topRegions,
+    topSources,
+    topBrowsers,
+    topDevices,
+    topLanguages,
+    topPlatforms,
+    topSocialPlatforms,
+    topDays,
+    popularHours
+  ] = await Promise.all([
+    getLinkOverviewViaQueries(linkId, timeZone),
+    safeTimed("get_link_timeseries(hours)", getLinkTimeseries(linkId, "hours", 24), fallback.timeseries.hours, LINK_ANALYTICS_QUERY_TIMEOUT_MS),
+    safeTimed("get_link_timeseries(days)", getLinkTimeseries(linkId, "days", 30), fallback.timeseries.days, LINK_ANALYTICS_QUERY_TIMEOUT_MS),
+    safeTimed(
+      "get_link_timeseries(months)",
+      getLinkTimeseries(linkId, "months", 12),
+      fallback.timeseries.months,
+      LINK_ANALYTICS_QUERY_TIMEOUT_MS
+    ),
+    safeTimed(
+      "get_link_top_dimension(country)",
+      getLinkTopDimension(linkId, "country", 12),
+      fallback.worldMap,
+      LINK_ANALYTICS_QUERY_TIMEOUT_MS
+    ),
+    safeTimed("get_link_top_dimension(city)", getLinkTopDimension(linkId, "city", 8), fallback.topCities, LINK_ANALYTICS_QUERY_TIMEOUT_MS),
+    safeTimed(
+      "get_link_top_dimension(region)",
+      getLinkTopDimension(linkId, "region", 8),
+      fallback.topRegions,
+      LINK_ANALYTICS_QUERY_TIMEOUT_MS
+    ),
+    safeTimed(
+      "get_link_top_dimension(source)",
+      getLinkTopDimension(linkId, "source", 8),
+      fallback.topSources,
+      LINK_ANALYTICS_QUERY_TIMEOUT_MS
+    ),
+    safeTimed(
+      "get_link_top_dimension(browser)",
+      getLinkTopDimension(linkId, "browser", 8),
+      fallback.topBrowsers,
+      LINK_ANALYTICS_QUERY_TIMEOUT_MS
+    ),
+    safeTimed(
+      "get_link_top_dimension(device)",
+      getLinkTopDimension(linkId, "device", 6),
+      fallback.topDevices,
+      LINK_ANALYTICS_QUERY_TIMEOUT_MS
+    ),
+    safeTimed(
+      "get_link_top_dimension(language)",
+      getLinkTopDimension(linkId, "language", 8),
+      fallback.topLanguages,
+      LINK_ANALYTICS_QUERY_TIMEOUT_MS
+    ),
+    safeTimed(
+      "get_link_top_dimension(platform)",
+      getLinkTopDimension(linkId, "platform", 8),
+      fallback.topPlatforms,
+      LINK_ANALYTICS_QUERY_TIMEOUT_MS
+    ),
+    safeTimed(
+      "get_link_top_dimension(social)",
+      getLinkTopDimension(linkId, "social", 8),
+      fallback.topSocialPlatforms,
+      LINK_ANALYTICS_QUERY_TIMEOUT_MS
+    ),
+    safeTimed("get_link_day_breakdown", getLinkDayBreakdown(linkId), fallback.topDays, LINK_ANALYTICS_QUERY_TIMEOUT_MS),
+    safeTimed("get_link_hour_breakdown", getLinkHourBreakdown(linkId), fallback.popularHours, LINK_ANALYTICS_QUERY_TIMEOUT_MS)
+  ]);
+
+  const normalizedOverview: LinkOverviewStats = {
+    ...overview,
+    clicksToday: hoursSeries.length > 0 ? sumCurrentDayClicks(hoursSeries, timeZone) : overview.clicksToday
+  };
+
+  const data: LinkAnalyticsData = {
+    overview: normalizedOverview,
+    timeseries: {
+      hours: hoursSeries,
+      days: daysSeries,
+      months: monthsSeries
+    },
+    worldMap: topCountries,
+    topCities,
+    topRegions,
+    topDays,
+    popularHours,
+    clickType: [
+      { label: "Visits", clicks: normalizedOverview.visits },
+      { label: "Landing Views", clicks: normalizedOverview.landingViews },
+      { label: "Human Clicks", clicks: normalizedOverview.humanClicks },
+      { label: "Redirects (human)", clicks: normalizedOverview.redirects },
+      { label: "Bots", clicks: normalizedOverview.botHits },
+      { label: "Prefetch", clicks: normalizedOverview.prefetchHits }
+    ],
+    topSocialPlatforms,
+    topSources,
+    topBrowsers,
+    topDevices,
+    topLanguages,
+    topPlatforms
+  };
+
+  cachedRuntimeLinkAnalytics.set(cacheKey, {
+    data,
+    expiresAt: nowMs + LINK_ANALYTICS_CACHE_TTL_MS
+  });
+
+  return data;
+}
+
 export async function getLinkAnalyticsData(linkId: string, timeZone?: string): Promise<LinkAnalyticsData> {
   const resolvedTimeZone = resolveAnalyticsTimeZone(timeZone);
   try {
-    return await getLinkAnalyticsDataFromEvents(linkId, resolvedTimeZone);
+    return await getLinkAnalyticsDataViaQueries(linkId, resolvedTimeZone);
   } catch (error) {
     console.error("getLinkAnalyticsData fallback to empty payload", error);
     return createEmptyLinkAnalyticsData();
