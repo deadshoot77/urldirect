@@ -148,6 +148,8 @@ export interface GlobalAnalyticsData extends LinkAnalyticsData {
   topLinks: LabelCount[];
 }
 
+export type AnalyticsRange = "today" | "this_week" | "last_week" | "this_month";
+
 export function createEmptyGlobalAnalyticsData(totalLinks = 0): GlobalAnalyticsData {
   const topDays: LabelCount[] = DAY_LABELS.map((label) => ({
     label,
@@ -311,11 +313,10 @@ const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 const ADMIN_SETTINGS_CACHE_TTL_MS = 60_000;
 const GLOBAL_ANALYTICS_CACHE_TTL_MS = 30_000;
 const DEFAULT_ANALYTICS_TIME_ZONE = "Europe/Paris";
+const DEFAULT_ANALYTICS_RANGE: AnalyticsRange = "today";
 const GLOBAL_ANALYTICS_BATCH_SIZE = 500;
-const GLOBAL_ANALYTICS_MAX_ROWS = 10_000;
-const GLOBAL_ANALYTICS_MAX_DURATION_MS = 5_000;
 const LIST_STATS_RPC_BACKOFF_MS = 5 * 60_000;
-const LIST_STATS_RPC_TIMEOUT_MS = 4_000;
+const LIST_STATS_RPC_TIMEOUT_MS = 8_000;
 const LINK_ANALYTICS_RPC_TIMEOUT_MS = 4_000;
 const SOCIAL_SOURCES = new Set([
   "facebook",
@@ -344,6 +345,7 @@ let cachedRuntimeGlobalAnalytics:
       data: GlobalAnalyticsData;
       expiresAt: number;
       timeZone: string;
+      range: AnalyticsRange;
     }
   | null = null;
 let listStatsRpcDisabledUntilMs = 0;
@@ -651,6 +653,205 @@ function toDayKey(epochMs: number, formatter: Intl.DateTimeFormat): string {
   return formatter.format(new Date(epochMs));
 }
 
+interface AnalyticsWindow {
+  range: AnalyticsRange;
+  timeZone: string;
+  startAtMs: number;
+  endAtMs: number;
+}
+
+function normalizeAnalyticsRange(value: string | null | undefined): AnalyticsRange {
+  if (value === "today" || value === "this_week" || value === "last_week" || value === "this_month") {
+    return value;
+  }
+  return DEFAULT_ANALYTICS_RANGE;
+}
+
+interface ZonedDateTimeParts {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+  weekday: number;
+}
+
+const zonedDateTimeFormatterCache = new Map<string, Intl.DateTimeFormat>();
+
+function getZonedDateTimeFormatter(timeZone: string): Intl.DateTimeFormat {
+  const cached = zonedDateTimeFormatterCache.get(timeZone);
+  if (cached) return cached;
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    weekday: "short"
+  });
+  zonedDateTimeFormatterCache.set(timeZone, formatter);
+  return formatter;
+}
+
+function getZonedDateTimeParts(epochMs: number, timeZone: string): ZonedDateTimeParts {
+  const parts = getZonedDateTimeFormatter(timeZone).formatToParts(new Date(epochMs));
+
+  let year = 0;
+  let month = 0;
+  let day = 0;
+  let hour = 0;
+  let minute = 0;
+  let second = 0;
+  let weekday = 0;
+
+  for (const part of parts) {
+    if (part.type === "year") year = Number(part.value);
+    if (part.type === "month") month = Number(part.value);
+    if (part.type === "day") day = Number(part.value);
+    if (part.type === "hour") hour = Number(part.value);
+    if (part.type === "minute") minute = Number(part.value);
+    if (part.type === "second") second = Number(part.value);
+    if (part.type === "weekday") {
+      const short = part.value.slice(0, 3).toLowerCase();
+      if (short === "sun") weekday = 0;
+      if (short === "mon") weekday = 1;
+      if (short === "tue") weekday = 2;
+      if (short === "wed") weekday = 3;
+      if (short === "thu") weekday = 4;
+      if (short === "fri") weekday = 5;
+      if (short === "sat") weekday = 6;
+    }
+  }
+
+  return { year, month, day, hour, minute, second, weekday };
+}
+
+function getTimeZoneOffsetMs(epochMs: number, timeZone: string): number {
+  const parts = getZonedDateTimeParts(epochMs, timeZone);
+  const asUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return asUtc - epochMs;
+}
+
+function zonedDateTimeToUtcMs(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+  timeZone: string
+): number {
+  let guess = Date.UTC(year, month - 1, day, hour, minute, second);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const offset = getTimeZoneOffsetMs(guess, timeZone);
+    const next = Date.UTC(year, month - 1, day, hour, minute, second) - offset;
+    if (Math.abs(next - guess) < 1000) {
+      return next;
+    }
+    guess = next;
+  }
+  return guess;
+}
+
+function getAnalyticsWindow(range: AnalyticsRange, timeZone: string, nowMs = Date.now()): AnalyticsWindow {
+  const nowParts = getZonedDateTimeParts(nowMs, timeZone);
+  const currentCivilDate = new Date(Date.UTC(nowParts.year, nowParts.month - 1, nowParts.day, 0, 0, 0));
+  const tomorrowCivilDate = new Date(currentCivilDate.getTime());
+  tomorrowCivilDate.setUTCDate(tomorrowCivilDate.getUTCDate() + 1);
+
+  const todayStartMs = zonedDateTimeToUtcMs(
+    currentCivilDate.getUTCFullYear(),
+    currentCivilDate.getUTCMonth() + 1,
+    currentCivilDate.getUTCDate(),
+    0,
+    0,
+    0,
+    timeZone
+  );
+  const tomorrowStartMs = zonedDateTimeToUtcMs(
+    tomorrowCivilDate.getUTCFullYear(),
+    tomorrowCivilDate.getUTCMonth() + 1,
+    tomorrowCivilDate.getUTCDate(),
+    0,
+    0,
+    0,
+    timeZone
+  );
+
+  if (range === "today") {
+    return {
+      range,
+      timeZone,
+      startAtMs: todayStartMs,
+      endAtMs: Math.min(nowMs, tomorrowStartMs)
+    };
+  }
+
+  const mondayOffset = (nowParts.weekday + 6) % 7;
+  const weekStartCivilDate = new Date(currentCivilDate.getTime());
+  weekStartCivilDate.setUTCDate(weekStartCivilDate.getUTCDate() - mondayOffset);
+  const weekStartMs = zonedDateTimeToUtcMs(
+    weekStartCivilDate.getUTCFullYear(),
+    weekStartCivilDate.getUTCMonth() + 1,
+    weekStartCivilDate.getUTCDate(),
+    0,
+    0,
+    0,
+    timeZone
+  );
+
+  if (range === "this_week") {
+    return {
+      range,
+      timeZone,
+      startAtMs: weekStartMs,
+      endAtMs: Math.min(nowMs, tomorrowStartMs)
+    };
+  }
+
+  if (range === "last_week") {
+    const lastWeekStartCivilDate = new Date(weekStartCivilDate.getTime());
+    lastWeekStartCivilDate.setUTCDate(lastWeekStartCivilDate.getUTCDate() - 7);
+    const lastWeekStartMs = zonedDateTimeToUtcMs(
+      lastWeekStartCivilDate.getUTCFullYear(),
+      lastWeekStartCivilDate.getUTCMonth() + 1,
+      lastWeekStartCivilDate.getUTCDate(),
+      0,
+      0,
+      0,
+      timeZone
+    );
+    return {
+      range,
+      timeZone,
+      startAtMs: lastWeekStartMs,
+      endAtMs: weekStartMs
+    };
+  }
+
+  const monthStartCivilDate = new Date(Date.UTC(nowParts.year, nowParts.month - 1, 1, 0, 0, 0));
+  const monthStartMs = zonedDateTimeToUtcMs(
+    monthStartCivilDate.getUTCFullYear(),
+    monthStartCivilDate.getUTCMonth() + 1,
+    monthStartCivilDate.getUTCDate(),
+    0,
+    0,
+    0,
+    timeZone
+  );
+
+  return {
+    range,
+    timeZone,
+    startAtMs: monthStartMs,
+    endAtMs: Math.min(nowMs, tomorrowStartMs)
+  };
+}
+
 async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -726,27 +927,22 @@ function buildMonthsSeries(counter: Map<number, number>, start: number, points: 
   return output;
 }
 
-async function aggregateGlobalAnalytics(timeZone: string): Promise<AggregatedGlobalAnalyticsData> {
+async function aggregateGlobalAnalytics(window: AnalyticsWindow): Promise<AggregatedGlobalAnalyticsData> {
   const safeBatchSize = GLOBAL_ANALYTICS_BATCH_SIZE;
-  const maxRows = GLOBAL_ANALYTICS_MAX_ROWS;
-  const deadlineAt = Date.now() + GLOBAL_ANALYTICS_MAX_DURATION_MS;
-  const nowMs = Date.now();
-  const utcHourEnd = startOfUtcHour(nowMs);
-  const utcDayEnd = startOfUtcDay(nowMs);
-  const utcMonthEnd = startOfUtcMonth(nowMs);
+  const startAtMs = window.startAtMs;
+  const endAtMs = window.endAtMs;
 
-  const utcHourStart = utcHourEnd - 23 * HOUR_MS;
-  const utcDayStart = utcDayEnd - 29 * DAY_MS;
-  const monthStartDate = new Date(utcMonthEnd);
-  monthStartDate.setUTCMonth(monthStartDate.getUTCMonth() - 11);
-  const utcMonthStart = monthStartDate.getTime();
-
-  const dayKeyFormatter = createDayKeyFormatter(timeZone);
-  const todayDayKey = toDayKey(nowMs, dayKeyFormatter);
-  const last7DayKeys = new Set<string>();
-  for (let index = 0; index < 7; index += 1) {
-    last7DayKeys.add(toDayKey(nowMs - index * DAY_MS, dayKeyFormatter));
-  }
+  const utcHourEnd = startOfUtcHour(Math.max(startAtMs, endAtMs - 1));
+  const utcHourStart = Math.max(startOfUtcHour(startAtMs), utcHourEnd - 23 * HOUR_MS);
+  const utcDayStart = startOfUtcDay(startAtMs);
+  const utcDayEnd = startOfUtcDay(Math.max(startAtMs, endAtMs - 1));
+  const utcMonthStart = startOfUtcMonth(startAtMs);
+  const endMonthStart = startOfUtcMonth(Math.max(startAtMs, endAtMs - 1));
+  const utcMonthEnd = endMonthStart;
+  const monthDiff =
+    (new Date(endMonthStart).getUTCFullYear() - new Date(utcMonthStart).getUTCFullYear()) * 12 +
+    (new Date(endMonthStart).getUTCMonth() - new Date(utcMonthStart).getUTCMonth());
+  const monthPoints = Math.max(1, monthDiff + 1);
 
   let redirects = 0;
   let visits = 0;
@@ -762,7 +958,6 @@ async function aggregateGlobalAnalytics(timeZone: string): Promise<AggregatedGlo
   let lastClickAt: string | null = null;
   let lastClickAtMs = Number.NEGATIVE_INFINITY;
   let offset = 0;
-  let processedRows = 0;
 
   const linksCounter = new Map<string, number>();
   const countriesCounter = new Map<string, number>();
@@ -781,15 +976,13 @@ async function aggregateGlobalAnalytics(timeZone: string): Promise<AggregatedGlo
   const hourBreakdown = Array.from({ length: 24 }, () => 0);
 
   while (true) {
-    if (processedRows >= maxRows || Date.now() >= deadlineAt) {
-      break;
-    }
-
     const { data, error } = await getSupabaseAdminClient()
       .from("click_events")
       .select(
         "slug, created_at, country, region, city, source, browser, device, language, platform, is_unique, event_type, traffic_category, request_method, is_bot, is_prefetch, metadata"
       )
+      .gte("created_at", new Date(startAtMs).toISOString())
+      .lt("created_at", new Date(endAtMs).toISOString())
       .order("created_at", { ascending: false })
       .range(offset, offset + safeBatchSize - 1);
 
@@ -801,7 +994,6 @@ async function aggregateGlobalAnalytics(timeZone: string): Promise<AggregatedGlo
     if (rows.length === 0) {
       break;
     }
-    processedRows += rows.length;
 
     for (const row of rows) {
       const eventType = normalizeTrackingEventType(row.event_type);
@@ -860,17 +1052,9 @@ async function aggregateGlobalAnalytics(timeZone: string): Promise<AggregatedGlo
           lastClickAt = new Date(eventAt).toISOString();
         }
 
-        const eventDayKey = toDayKey(eventAt, dayKeyFormatter);
-        if (eventDayKey === todayDayKey) {
-          clicksToday += 1;
-        }
-        if (last7DayKeys.has(eventDayKey)) {
-          clicksLast7Days += 1;
-        }
-
-        const eventDate = new Date(eventAt);
-        dayBreakdown[eventDate.getUTCDay()] += 1;
-        hourBreakdown[eventDate.getUTCHours()] += 1;
+        const zonedParts = getZonedDateTimeParts(eventAt, window.timeZone);
+        dayBreakdown[zonedParts.weekday] += 1;
+        hourBreakdown[zonedParts.hour] += 1;
 
         const hourBucket = startOfUtcHour(eventAt);
         if (hourBucket >= utcHourStart && hourBucket <= utcHourEnd) {
@@ -882,7 +1066,7 @@ async function aggregateGlobalAnalytics(timeZone: string): Promise<AggregatedGlo
           incrementNumericCounter(daySeriesCounter, dayBucket);
         }
 
-        const monthBucket = Date.UTC(eventDate.getUTCFullYear(), eventDate.getUTCMonth(), 1);
+        const monthBucket = Date.UTC(zonedParts.year, zonedParts.month - 1, 1);
         if (monthBucket >= utcMonthStart && monthBucket <= utcMonthEnd) {
           incrementNumericCounter(monthSeriesCounter, monthBucket);
         }
@@ -894,9 +1078,6 @@ async function aggregateGlobalAnalytics(timeZone: string): Promise<AggregatedGlo
     }
 
     offset += safeBatchSize;
-    if (processedRows >= maxRows || Date.now() >= deadlineAt) {
-      break;
-    }
   }
 
   const topDays: LabelCount[] = DAY_LABELS.map((label, index) => ({
@@ -908,6 +1089,9 @@ async function aggregateGlobalAnalytics(timeZone: string): Promise<AggregatedGlo
     label: `${formatTwoDigits(index)}:00`,
     clicks
   }));
+
+  clicksToday = redirects;
+  clicksLast7Days = redirects;
 
   const overview: LinkOverviewStats = {
     totalClicks: redirects,
@@ -932,7 +1116,7 @@ async function aggregateGlobalAnalytics(timeZone: string): Promise<AggregatedGlo
     timeseries: {
       hours: buildHoursSeries(hourSeriesCounter, utcHourStart, utcHourEnd),
       days: buildDaysSeries(daySeriesCounter, utcDayStart, utcDayEnd),
-      months: buildMonthsSeries(monthSeriesCounter, utcMonthStart, 12)
+      months: buildMonthsSeries(monthSeriesCounter, utcMonthStart, monthPoints)
     },
     worldMap: toSortedLabelCounts(countriesCounter, 12),
     topCities: toSortedLabelCounts(citiesCounter, 8),
@@ -956,20 +1140,26 @@ async function aggregateGlobalAnalytics(timeZone: string): Promise<AggregatedGlo
   };
 }
 
-export async function getGlobalAnalyticsData(timeZone?: string): Promise<GlobalAnalyticsData> {
+export async function getGlobalAnalyticsData(options?: {
+  timeZone?: string;
+  range?: string | null;
+}): Promise<GlobalAnalyticsData> {
   const nowMs = Date.now();
-  const resolvedTimeZone = resolveAnalyticsTimeZone(timeZone);
+  const resolvedTimeZone = resolveAnalyticsTimeZone(options?.timeZone);
+  const resolvedRange = normalizeAnalyticsRange(options?.range);
   if (
     cachedRuntimeGlobalAnalytics &&
     cachedRuntimeGlobalAnalytics.expiresAt > nowMs &&
-    cachedRuntimeGlobalAnalytics.timeZone === resolvedTimeZone
+    cachedRuntimeGlobalAnalytics.timeZone === resolvedTimeZone &&
+    cachedRuntimeGlobalAnalytics.range === resolvedRange
   ) {
     return cachedRuntimeGlobalAnalytics.data;
   }
 
+  const window = getAnalyticsWindow(resolvedRange, resolvedTimeZone, nowMs);
   const [{ count, error }, aggregated] = await Promise.all([
     getSupabaseAdminClient().from("short_links").select("id", { head: true, count: "exact" }).eq("is_active", true),
-    aggregateGlobalAnalytics(resolvedTimeZone)
+    aggregateGlobalAnalytics(window)
   ]);
 
   if (error) {
@@ -999,7 +1189,8 @@ export async function getGlobalAnalyticsData(timeZone?: string): Promise<GlobalA
   cachedRuntimeGlobalAnalytics = {
     data,
     expiresAt: nowMs + GLOBAL_ANALYTICS_CACHE_TTL_MS,
-    timeZone: resolvedTimeZone
+    timeZone: resolvedTimeZone,
+    range: resolvedRange
   };
 
   return data;
@@ -1079,7 +1270,32 @@ async function listShortLinksWithoutRpc(
     }
   }
 
-  const items = rows.map((row) => mapShortLinkListItem(row));
+  const statsByRow = await Promise.all(
+    rows.map(async (row) => {
+      try {
+        const overview = await withTimeout(getLinkOverview(row.id), 2_500, "get_link_overview(list fallback)");
+        return {
+          clicks_received: overview.redirects,
+          clicks_today: overview.clicksToday,
+          last_click_at: overview.lastClickAt
+        };
+      } catch (error) {
+        console.error("listShortLinksWithStats fallback overview failed", error);
+        return {
+          clicks_received: 0,
+          clicks_today: 0,
+          last_click_at: null
+        };
+      }
+    })
+  );
+
+  const items = rows.map((row, index) =>
+    mapShortLinkListItem({
+      ...row,
+      ...statsByRow[index]
+    })
+  );
   const totalPages = Math.max(1, Math.ceil(safeTotal / safeSize));
 
   return {

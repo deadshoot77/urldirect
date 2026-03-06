@@ -11,7 +11,7 @@ import { shortLinkCreateSchema } from "@/lib/validation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-const GLOBAL_ANALYTICS_TIMEOUT_MS = 6_000;
+const GLOBAL_ANALYTICS_TIMEOUT_MS = 12_000;
 
 async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -41,6 +41,7 @@ export async function GET(request: NextRequest) {
   const pageSize = Number(request.nextUrl.searchParams.get("pageSize") ?? "20");
   const includeAnalytics = request.nextUrl.searchParams.get("includeAnalytics") === "1";
   const timeZone = request.nextUrl.searchParams.get("tz") ?? undefined;
+  const range = request.nextUrl.searchParams.get("range");
 
   try {
     const [links, settings] = await Promise.all([
@@ -52,7 +53,10 @@ export async function GET(request: NextRequest) {
     if (includeAnalytics) {
       try {
         globalAnalytics = await withTimeout(
-          getGlobalAnalyticsData(timeZone),
+          getGlobalAnalyticsData({
+            timeZone,
+            range
+          }),
           GLOBAL_ANALYTICS_TIMEOUT_MS,
           "getGlobalAnalyticsData"
         );

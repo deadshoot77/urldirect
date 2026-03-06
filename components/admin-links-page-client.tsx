@@ -6,7 +6,7 @@ import AdminCharts from "@/components/admin-charts";
 import AdminLanguageToggle from "@/components/admin-language-toggle";
 import LogoutButton from "@/components/logout-button";
 import TopToast, { type TopToastKind, type TopToastState } from "@/components/top-toast";
-import type { GlobalAnalyticsData, LinkAnalyticsData, PaginatedShortLinks } from "@/lib/links";
+import type { AnalyticsRange, GlobalAnalyticsData, LinkAnalyticsData, PaginatedShortLinks } from "@/lib/links";
 import { ADMIN_LANG_STORAGE_KEY, normalizeAdminLang, type AdminLang } from "@/lib/i18n";
 import type { AdminSettings } from "@/lib/types";
 
@@ -63,6 +63,12 @@ const words = {
     noData: "Pas de donnees",
     loadingAnalytics: "Chargement analytics...",
     loadingTitle: "Chargement",
+    rangeLabel: "Periode",
+    rangeToday: "Aujourd'hui",
+    rangeThisWeek: "Cette semaine",
+    rangeLastWeek: "Semaine derniere",
+    rangeThisMonth: "Mois actuel",
+    rangeClicks: "Redirections (periode)",
     sort: "Trier",
     latest: "Recents",
     oldest: "Anciens",
@@ -141,6 +147,12 @@ const words = {
     noData: "No data",
     loadingAnalytics: "Loading analytics...",
     loadingTitle: "Loading",
+    rangeLabel: "Range",
+    rangeToday: "Today",
+    rangeThisWeek: "This week",
+    rangeLastWeek: "Last week",
+    rangeThisMonth: "Current month",
+    rangeClicks: "Redirects (range)",
     sort: "Sort",
     latest: "Latest",
     oldest: "Oldest",
@@ -280,6 +292,10 @@ export default function AdminLinksPageClient({
   const [deletingLinkId, setDeletingLinkId] = useState<string | null>(null);
   const [globalBackgroundUrl, setGlobalBackgroundUrl] = useState(initialSettings.globalBackgroundUrl ?? "");
   const [loadingDots, setLoadingDots] = useState("");
+  const [analyticsRange, setAnalyticsRange] = useState<AnalyticsRange>("today");
+  const [loadedAnalyticsRange, setLoadedAnalyticsRange] = useState<AnalyticsRange | null>(
+    initialGlobalAnalyticsLoaded ? "today" : null
+  );
   const [analyticsPrefetchAttempted, setAnalyticsPrefetchAttempted] = useState(initialGlobalAnalyticsLoaded);
 
   useEffect(() => {
@@ -301,15 +317,18 @@ export default function AdminLinksPageClient({
       return;
     }
     setAnalyticsPrefetchAttempted(true);
-    void refresh(links.page, { includeAnalytics: true, silent: true });
+    void refresh(links.page, { includeAnalytics: true, silent: true, analyticsRange });
   }, [analyticsPrefetchAttempted, globalAnalyticsLoaded]);
 
   useEffect(() => {
-    if (activeSection !== "analytics" || globalAnalyticsLoaded || loadingAnalyticsData) {
+    if (activeSection !== "analytics" || loadingAnalyticsData) {
       return;
     }
-    void refresh(links.page, { includeAnalytics: true });
-  }, [activeSection, globalAnalyticsLoaded, loadingAnalyticsData, links.page]);
+    if (globalAnalyticsLoaded && loadedAnalyticsRange === analyticsRange) {
+      return;
+    }
+    void refresh(links.page, { includeAnalytics: true, silent: globalAnalyticsLoaded, analyticsRange });
+  }, [activeSection, analyticsRange, globalAnalyticsLoaded, loadedAnalyticsRange, loadingAnalyticsData, links.page]);
 
   useEffect(() => {
     if (activeSection !== "analytics" || globalAnalyticsLoaded) {
@@ -326,16 +345,25 @@ export default function AdminLinksPageClient({
   }, [activeSection, globalAnalyticsLoaded]);
 
   const copy = words[lang];
+  const analyticsRangeOptions = useMemo(
+    () => [
+      { value: "today" as const, label: copy.rangeToday },
+      { value: "this_week" as const, label: copy.rangeThisWeek },
+      { value: "last_week" as const, label: copy.rangeLastWeek },
+      { value: "this_month" as const, label: copy.rangeThisMonth }
+    ],
+    [copy.rangeLastWeek, copy.rangeThisMonth, copy.rangeThisWeek, copy.rangeToday]
+  );
 
   const statsCards = useMemo(
     () => [
       { label: copy.totalLinks, value: globalAnalytics.totalLinks },
-      { label: copy.clicksLast7Days, value: globalAnalytics.clicksLast7Days },
+      { label: copy.rangeClicks, value: globalAnalytics.clicksLast7Days },
       { label: copy.redirects, value: globalAnalytics.overview.redirects },
       { label: copy.visits, value: globalAnalytics.overview.visits }
     ],
     [
-      copy.clicksLast7Days,
+      copy.rangeClicks,
       copy.redirects,
       copy.totalLinks,
       copy.visits,
@@ -404,9 +432,13 @@ export default function AdminLinksPageClient({
     window.localStorage.setItem(ADMIN_LANG_STORAGE_KEY, nextLang);
   }
 
-  async function refresh(nextPage = links.page, options?: { includeAnalytics?: boolean; silent?: boolean }) {
+  async function refresh(
+    nextPage = links.page,
+    options?: { includeAnalytics?: boolean; silent?: boolean; analyticsRange?: AnalyticsRange }
+  ) {
     const includeAnalytics = options?.includeAnalytics ?? false;
     const silent = options?.silent ?? false;
+    const requestAnalyticsRange = options?.analyticsRange ?? analyticsRange;
     if (!silent) {
       setLoading(true);
     }
@@ -416,7 +448,7 @@ export default function AdminLinksPageClient({
     try {
       const timeZoneParam = encodeURIComponent(clientTimeZone);
       const response = await fetch(
-        `/api/admin/links?page=${nextPage}&pageSize=${links.pageSize}&includeAnalytics=${includeAnalytics ? "1" : "0"}&tz=${timeZoneParam}`,
+        `/api/admin/links?page=${nextPage}&pageSize=${links.pageSize}&includeAnalytics=${includeAnalytics ? "1" : "0"}&tz=${timeZoneParam}&range=${requestAnalyticsRange}`,
         {
         cache: "no-store",
         credentials: "include"
@@ -440,6 +472,7 @@ export default function AdminLinksPageClient({
       if (payload.globalAnalytics) {
         setGlobalAnalytics(payload.globalAnalytics);
         setGlobalAnalyticsLoaded(true);
+        setLoadedAnalyticsRange(requestAnalyticsRange);
       }
     } catch (error) {
       if (!silent) {
@@ -689,7 +722,25 @@ export default function AdminLinksPageClient({
           </section>
         ) : (
           <section className="rb-panel">
-            <h2>{copy.globalStatsTitle}</h2>
+            <div className="rb-overview-header">
+              <div>
+                <h2>{copy.globalStatsTitle}</h2>
+              </div>
+              <label htmlFor="analytics_range_select" className="rb-inline-control">
+                <span>{copy.rangeLabel}</span>
+                <select
+                  id="analytics_range_select"
+                  value={analyticsRange}
+                  onChange={(event) => setAnalyticsRange(event.target.value as AnalyticsRange)}
+                >
+                  {analyticsRangeOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
             <div className="rb-global-metrics">
               {statsCards.map((item) => (
                 <article key={item.label}>
