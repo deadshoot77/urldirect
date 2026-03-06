@@ -1,7 +1,13 @@
 import { redirect } from "next/navigation";
 import AdminLinksPageClient from "@/components/admin-links-page-client";
 import { isAdminAuthenticated } from "@/lib/auth";
-import { createEmptyGlobalAnalyticsData, getAdminSettings, listShortLinksWithStats } from "@/lib/links";
+import {
+  createEmptyGlobalAnalyticsData,
+  getAdminSettings,
+  listShortLinksWithStats,
+  type PaginatedShortLinks
+} from "@/lib/links";
+import type { AdminSettings } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -20,10 +26,36 @@ export default async function AdminLinksPage({ searchParams }: LinksPageProps) {
   const resolvedSearch = await searchParams;
   const page = Number(resolvedSearch.page ?? "1");
   const pageSize = Number(resolvedSearch.pageSize ?? "20");
-  const [links, settings] = await Promise.all([
-    listShortLinksWithStats(page, pageSize),
-    getAdminSettings({ includeUsage: false })
-  ]);
+  const safePage = Number.isFinite(page) && page > 0 ? Math.floor(page) : 1;
+  const safePageSize = Number.isFinite(pageSize) && pageSize > 0 ? Math.floor(pageSize) : 20;
+  let links: PaginatedShortLinks = {
+    items: [],
+    page: safePage,
+    pageSize: safePageSize,
+    total: 0,
+    totalPages: 1
+  };
+  let settings: AdminSettings = {
+    plan: "pro" as const,
+    clickLimitMonthly: Number.MAX_SAFE_INTEGER,
+    trackingEnabled: true,
+    landingEnabled: false,
+    globalBackgroundUrl: null as string | null,
+    limitBehavior: "drop" as const,
+    usageThisMonth: 0,
+    limitReached: false
+  };
+
+  try {
+    const [loadedLinks, loadedSettings] = await Promise.all([
+      listShortLinksWithStats(safePage, safePageSize),
+      getAdminSettings({ includeUsage: false })
+    ]);
+    links = loadedLinks;
+    settings = loadedSettings;
+  } catch (error) {
+    console.error("admin links page load fallback", error);
+  }
   const initialGlobalAnalytics = createEmptyGlobalAnalyticsData(links.total);
 
   return (
