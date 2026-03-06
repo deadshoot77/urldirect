@@ -22,7 +22,7 @@ export async function GET(request: NextRequest) {
   try {
     const [links, settings, globalAnalytics] = await Promise.all([
       listShortLinksWithStats(page, pageSize),
-      getAdminSettings(),
+      getAdminSettings({ includeUsage: false }),
       includeAnalytics ? getGlobalAnalyticsData() : Promise.resolve(null)
     ]);
     return NextResponse.json({

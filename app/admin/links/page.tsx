@@ -22,7 +22,7 @@ export default async function AdminLinksPage({ searchParams }: LinksPageProps) {
   const pageSize = Number(resolvedSearch.pageSize ?? "20");
   const [links, settings] = await Promise.all([
     listShortLinksWithStats(page, pageSize),
-    getAdminSettings()
+    getAdminSettings({ includeUsage: false })
   ]);
   const initialGlobalAnalytics = createEmptyGlobalAnalyticsData(links.total);
 

@@ -16,7 +16,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const settings = await getAdminSettings();
+    const settings = await getAdminSettings({ includeUsage: false });
     return NextResponse.json({ settings });
   } catch (error) {
     return NextResponse.json(
@@ -52,7 +52,7 @@ export async function PATCH(request: NextRequest) {
       landingEnabled: parsed.data.landing_enabled,
       globalBackgroundUrl: parsed.data.global_background_url
     });
-    const settings = await getAdminSettings();
+    const settings = await getAdminSettings({ includeUsage: false });
     return NextResponse.json({ settings });
   } catch (error) {
     return NextResponse.json(

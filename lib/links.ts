@@ -49,6 +49,16 @@ interface ShortLinkListRow {
   last_click_at: string | null;
 }
 
+interface ShortLinkListBaseRow {
+  id: string;
+  slug: string;
+  destination_url: string;
+  created_at: string;
+  is_favorite: boolean;
+  tags: unknown;
+  redirect_type: number;
+}
+
 interface SettingsRow {
   tracking_enabled: boolean;
   landing_enabled: boolean;
@@ -328,6 +338,12 @@ function toNumber(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function toSafePositiveInt(value: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  const normalized = Math.floor(value);
+  return normalized >= 1 ? normalized : fallback;
+}
+
 function toString(value: unknown, fallback = ""): string {
   if (typeof value === "string") return value;
   if (value === null || value === undefined) return fallback;
@@ -482,7 +498,7 @@ export async function getCurrentMonthClicks(): Promise<number> {
 }
 
 export async function getAdminSettings(options?: GetAdminSettingsOptions): Promise<AdminSettings> {
-  const includeUsage = options?.includeUsage ?? true;
+  const includeUsage = options?.includeUsage ?? false;
   const nowMs = Date.now();
 
   if (!includeUsage && cachedRuntimeAdminSettings && cachedRuntimeAdminSettings.expiresAt > nowMs) {
@@ -910,24 +926,10 @@ export async function getGlobalLinksStats(): Promise<GlobalLinksStats> {
   };
 }
 
-export async function listShortLinksWithStats(page = 1, pageSize = 20): Promise<PaginatedShortLinks> {
-  const safePage = Math.max(1, Math.floor(page));
-  const safeSize = Math.min(100, Math.max(1, Math.floor(pageSize)));
-  const offset = (safePage - 1) * safeSize;
-
-  const [{ count, error: totalError }, rows] = await Promise.all([
-    getSupabaseAdminClient().from("short_links").select("id", { head: true, count: "exact" }).eq("is_active", true),
-    runRpcList<ShortLinkListRow>("list_short_links_with_stats", {
-      p_limit: safeSize,
-      p_offset: offset
-    })
-  ]);
-
-  if (totalError) {
-    throw new Error(`listShortLinksWithStats total failed: ${totalError.message}`);
-  }
-
-  const items = rows.map((row) => ({
+function mapShortLinkListItem(
+  row: ShortLinkListBaseRow & Partial<Pick<ShortLinkListRow, "clicks_received" | "clicks_today" | "last_click_at">>
+): ShortLinkListItem {
+  return {
     id: row.id,
     slug: toString(row.slug),
     destinationUrl: toString(row.destination_url),
@@ -947,9 +949,83 @@ export async function listShortLinksWithStats(page = 1, pageSize = 20): Promise<
     clicksReceived: toNumber(row.clicks_received),
     clicksToday: toNumber(row.clicks_today),
     lastClickAt: toStringOrNull(row.last_click_at)
-  }));
+  };
+}
 
-  const safeTotal = totalError ? items.length : toNumber(count ?? 0);
+async function listShortLinksWithoutRpc(
+  safePage: number,
+  safeSize: number,
+  knownTotal: number | null
+): Promise<PaginatedShortLinks> {
+  const offset = (safePage - 1) * safeSize;
+  const { data, error } = await getSupabaseAdminClient()
+    .from("short_links")
+    .select("id, slug, destination_url, created_at, is_favorite, tags, redirect_type")
+    .eq("is_active", true)
+    .order("created_at", { ascending: false })
+    .range(offset, offset + safeSize - 1);
+
+  if (error) {
+    throw new Error(`listShortLinksWithStats fallback failed: ${error.message}`);
+  }
+
+  const rows = (data ?? []) as ShortLinkListBaseRow[];
+
+  let safeTotal = knownTotal;
+  if (safeTotal === null) {
+    const { count, error: countError } = await getSupabaseAdminClient()
+      .from("short_links")
+      .select("id", { head: true, count: "exact" })
+      .eq("is_active", true);
+    if (countError) {
+      console.error("listShortLinksWithStats fallback count failed", countError);
+      safeTotal = Math.max(offset + rows.length, rows.length);
+    } else {
+      safeTotal = toNumber(count ?? 0);
+    }
+  }
+
+  const items = rows.map((row) => mapShortLinkListItem(row));
+  const totalPages = Math.max(1, Math.ceil(safeTotal / safeSize));
+
+  return {
+    items,
+    page: safePage,
+    pageSize: safeSize,
+    total: safeTotal,
+    totalPages
+  };
+}
+
+export async function listShortLinksWithStats(page = 1, pageSize = 20): Promise<PaginatedShortLinks> {
+  const safePage = toSafePositiveInt(page, 1);
+  const safeSize = Math.min(100, toSafePositiveInt(pageSize, 20));
+  const offset = (safePage - 1) * safeSize;
+
+  const [{ count, error: totalError }, rpcResult] = await Promise.all([
+    getSupabaseAdminClient().from("short_links").select("id", { head: true, count: "exact" }).eq("is_active", true),
+    runRpcList<ShortLinkListRow>("list_short_links_with_stats", {
+      p_limit: safeSize,
+      p_offset: offset
+    })
+      .then((rows) => ({ rows, error: null as Error | null }))
+      .catch((error) => ({
+        rows: [] as ShortLinkListRow[],
+        error: error instanceof Error ? error : new Error(String(error))
+      }))
+  ]);
+
+  if (rpcResult.error) {
+    console.error("list_short_links_with_stats rpc failed; falling back to short_links table", rpcResult.error);
+    return listShortLinksWithoutRpc(safePage, safeSize, totalError ? null : toNumber(count ?? 0));
+  }
+
+  if (totalError) {
+    console.error("listShortLinksWithStats total failed; using estimated total", totalError);
+  }
+
+  const items = rpcResult.rows.map((row) => mapShortLinkListItem(row));
+  const safeTotal = totalError ? Math.max(offset + items.length, items.length) : toNumber(count ?? 0);
   const totalPages = Math.max(1, Math.ceil(safeTotal / safeSize));
 
   return {
