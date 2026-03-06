@@ -23,6 +23,7 @@ export async function GET(request: NextRequest, { params }: Params) {
 
   const resolved = await params;
   const includeAnalytics = request.nextUrl.searchParams.get("includeAnalytics") === "1";
+  const timeZone = request.nextUrl.searchParams.get("tz") ?? undefined;
 
   try {
     const link = await getShortLinkById(resolved.id);
@@ -34,7 +35,7 @@ export async function GET(request: NextRequest, { params }: Params) {
       return NextResponse.json({ link });
     }
 
-    const analytics = await getLinkAnalyticsData(resolved.id);
+    const analytics = await getLinkAnalyticsData(resolved.id, timeZone);
     return NextResponse.json({ link, analytics });
   } catch (error) {
     return NextResponse.json(

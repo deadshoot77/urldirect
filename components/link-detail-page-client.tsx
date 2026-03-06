@@ -214,7 +214,7 @@ export default function LinkDetailPageClient({ initialLink, initialAnalytics }: 
   const router = useRouter();
   const [link, setLink] = useState<ShortLink>(initialLink);
   const [analytics] = useState<LinkAnalyticsData>(initialAnalytics);
-  const [toast, setToast] = useState<TopToastState | null>(null);
+  const [toasts, setToasts] = useState<TopToastState[]>([]);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [lang, setLang] = useState<AdminLang>("fr");
@@ -265,11 +265,21 @@ export default function LinkDetailPageClient({ initialLink, initialAnalytics }: 
   const bestHours = useMemo(() => getTopShareHours(analytics.popularHours), [analytics.popularHours]);
 
   function showToast(message: string, kind: TopToastKind = "info") {
-    setToast({
-      id: Date.now() + Math.floor(Math.random() * 1000),
-      message,
-      kind
+    setToasts((current) => {
+      const next = [
+        ...current,
+        {
+          id: Date.now() + Math.floor(Math.random() * 1000),
+          message,
+          kind
+        }
+      ];
+      return next.slice(-5);
     });
+  }
+
+  function dismissToast(id: number) {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
   }
 
   function setLanguage(nextLang: AdminLang) {
@@ -390,7 +400,7 @@ export default function LinkDetailPageClient({ initialLink, initialAnalytics }: 
           </button>
         </div>
       </header>
-      <TopToast toast={toast} onDismiss={() => setToast(null)} />
+      <TopToast toasts={toasts} onDismiss={dismissToast} durationMs={10_000} />
 
       <section className="rb-link-detail-layout">
         <div className="rb-link-detail-main">

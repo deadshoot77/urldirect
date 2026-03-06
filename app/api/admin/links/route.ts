@@ -1,10 +1,32 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isAdminRequest } from "@/lib/auth";
-import { createShortLink, getAdminSettings, getGlobalAnalyticsData, listShortLinksWithStats } from "@/lib/links";
+import {
+  createEmptyGlobalAnalyticsData,
+  createShortLink,
+  getAdminSettings,
+  getGlobalAnalyticsData,
+  listShortLinksWithStats
+} from "@/lib/links";
 import { shortLinkCreateSchema } from "@/lib/validation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+const GLOBAL_ANALYTICS_TIMEOUT_MS = 6_000;
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([operation, timeoutPromise]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
 
 function unauthorized() {
   return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -18,17 +40,32 @@ export async function GET(request: NextRequest) {
   const page = Number(request.nextUrl.searchParams.get("page") ?? "1");
   const pageSize = Number(request.nextUrl.searchParams.get("pageSize") ?? "20");
   const includeAnalytics = request.nextUrl.searchParams.get("includeAnalytics") === "1";
+  const timeZone = request.nextUrl.searchParams.get("tz") ?? undefined;
 
   try {
-    const [links, settings, globalAnalytics] = await Promise.all([
+    const [links, settings] = await Promise.all([
       listShortLinksWithStats(page, pageSize),
-      getAdminSettings({ includeUsage: false }),
-      includeAnalytics ? getGlobalAnalyticsData() : Promise.resolve(null)
+      getAdminSettings({ includeUsage: false })
     ]);
+
+    let globalAnalytics = null;
+    if (includeAnalytics) {
+      try {
+        globalAnalytics = await withTimeout(
+          getGlobalAnalyticsData(timeZone),
+          GLOBAL_ANALYTICS_TIMEOUT_MS,
+          "getGlobalAnalyticsData"
+        );
+      } catch (error) {
+        console.error("admin links analytics fallback", error);
+        globalAnalytics = createEmptyGlobalAnalyticsData(links.total);
+      }
+    }
+
     return NextResponse.json({
       links,
       settings,
-      ...(globalAnalytics ? { globalAnalytics } : {})
+      ...(includeAnalytics ? { globalAnalytics } : {})
     });
   } catch (error) {
     return NextResponse.json(

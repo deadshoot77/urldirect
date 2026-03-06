@@ -18,7 +18,7 @@ interface AdminLinksPageClientProps {
 }
 
 type ViewMode = "list" | "grid";
-type AdminSection = "links" | "analytics";
+type AdminSection = "links" | "analytics" | "settings";
 
 interface NewLinkFormState {
   slug: string;
@@ -37,6 +37,7 @@ const words = {
     tabsAria: "Sections de la page",
     linksTab: "Links",
     analyticsTab: "Analytics",
+    settingsTab: "Parametres",
     globalStatsTitle: "Statistiques globales (tous les liens)",
     totalLinks: "Liens actifs",
     totalClicks: "Redirections (humains)",
@@ -114,6 +115,7 @@ const words = {
     tabsAria: "Page sections",
     linksTab: "Links",
     analyticsTab: "Analytics",
+    settingsTab: "Settings",
     globalStatsTitle: "Global Stats (all links)",
     totalLinks: "Active links",
     totalClicks: "Redirects (human)",
@@ -267,20 +269,27 @@ export default function AdminLinksPageClient({
   const [activeSection, setActiveSection] = useState<AdminSection>("links");
   const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [loading, setLoading] = useState(false);
+  const [loadingAnalyticsData, setLoadingAnalyticsData] = useState(false);
   const [creating, setCreating] = useState(false);
   const [showNewLinkForm, setShowNewLinkForm] = useState(false);
   const [form, setForm] = useState<NewLinkFormState>(() => createDefaultFormState());
-  const [toast, setToast] = useState<TopToastState | null>(null);
+  const [toasts, setToasts] = useState<TopToastState[]>([]);
   const [origin, setOrigin] = useState("");
+  const [clientTimeZone, setClientTimeZone] = useState("Europe/Paris");
   const [savingSettings, setSavingSettings] = useState(false);
   const [deletingLinkId, setDeletingLinkId] = useState<string | null>(null);
   const [globalBackgroundUrl, setGlobalBackgroundUrl] = useState(initialSettings.globalBackgroundUrl ?? "");
   const [loadingDots, setLoadingDots] = useState("");
+  const [analyticsPrefetchAttempted, setAnalyticsPrefetchAttempted] = useState(initialGlobalAnalyticsLoaded);
 
   useEffect(() => {
     setOrigin(window.location.origin);
     const stored = normalizeAdminLang(window.localStorage.getItem(ADMIN_LANG_STORAGE_KEY));
     setLang(stored);
+    const resolvedTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (resolvedTimeZone) {
+      setClientTimeZone(resolvedTimeZone);
+    }
   }, []);
 
   useEffect(() => {
@@ -288,11 +297,19 @@ export default function AdminLinksPageClient({
   }, [settings.globalBackgroundUrl]);
 
   useEffect(() => {
-    if (activeSection !== "analytics" || globalAnalyticsLoaded) {
+    if (globalAnalyticsLoaded || analyticsPrefetchAttempted) {
+      return;
+    }
+    setAnalyticsPrefetchAttempted(true);
+    void refresh(links.page, { includeAnalytics: true, silent: true });
+  }, [analyticsPrefetchAttempted, globalAnalyticsLoaded]);
+
+  useEffect(() => {
+    if (activeSection !== "analytics" || globalAnalyticsLoaded || loadingAnalyticsData) {
       return;
     }
     void refresh(links.page, { includeAnalytics: true });
-  }, [activeSection]);
+  }, [activeSection, globalAnalyticsLoaded, loadingAnalyticsData, links.page]);
 
   useEffect(() => {
     if (activeSection !== "analytics" || globalAnalyticsLoaded) {
@@ -365,11 +382,21 @@ export default function AdminLinksPageClient({
   const activeLinkAnalytics = activeLinkStats ? linkAnalytics[activeLinkStats.id] : null;
 
   function showToast(message: string, kind: TopToastKind = "info") {
-    setToast({
-      id: Date.now() + Math.floor(Math.random() * 1000),
-      message,
-      kind
+    setToasts((current) => {
+      const next = [
+        ...current,
+        {
+          id: Date.now() + Math.floor(Math.random() * 1000),
+          message,
+          kind
+        }
+      ];
+      return next.slice(-5);
     });
+  }
+
+  function dismissToast(id: number) {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
   }
 
   function setLanguage(nextLang: AdminLang) {
@@ -377,12 +404,19 @@ export default function AdminLinksPageClient({
     window.localStorage.setItem(ADMIN_LANG_STORAGE_KEY, nextLang);
   }
 
-  async function refresh(nextPage = links.page, options?: { includeAnalytics?: boolean }) {
+  async function refresh(nextPage = links.page, options?: { includeAnalytics?: boolean; silent?: boolean }) {
     const includeAnalytics = options?.includeAnalytics ?? false;
-    setLoading(true);
+    const silent = options?.silent ?? false;
+    if (!silent) {
+      setLoading(true);
+    }
+    if (includeAnalytics) {
+      setLoadingAnalyticsData(true);
+    }
     try {
+      const timeZoneParam = encodeURIComponent(clientTimeZone);
       const response = await fetch(
-        `/api/admin/links?page=${nextPage}&pageSize=${links.pageSize}&includeAnalytics=${includeAnalytics ? "1" : "0"}`,
+        `/api/admin/links?page=${nextPage}&pageSize=${links.pageSize}&includeAnalytics=${includeAnalytics ? "1" : "0"}&tz=${timeZoneParam}`,
         {
         cache: "no-store",
         credentials: "include"
@@ -408,9 +442,18 @@ export default function AdminLinksPageClient({
         setGlobalAnalyticsLoaded(true);
       }
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Failed to refresh links", "error");
+      if (!silent) {
+        showToast(error instanceof Error ? error.message : "Failed to refresh links", "error");
+      } else {
+        console.error("admin links analytics prefetch failed", error);
+      }
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
+      if (includeAnalytics) {
+        setLoadingAnalyticsData(false);
+      }
     }
   }
 
@@ -525,7 +568,8 @@ export default function AdminLinksPageClient({
 
     setLoadingLinkStatsId(linkId);
     try {
-      const response = await fetch(`/api/admin/links/${encodeURIComponent(linkId)}?includeAnalytics=1`, {
+      const timeZoneParam = encodeURIComponent(clientTimeZone);
+      const response = await fetch(`/api/admin/links/${encodeURIComponent(linkId)}?includeAnalytics=1&tz=${timeZoneParam}`, {
         cache: "no-store",
         credentials: "include"
       });
@@ -601,7 +645,7 @@ export default function AdminLinksPageClient({
           <LogoutButton label={copy.logout} loadingLabel={copy.signingOut} />
         </div>
       </header>
-      <TopToast toast={toast} onDismiss={() => setToast(null)} />
+      <TopToast toasts={toasts} onDismiss={dismissToast} durationMs={10_000} />
 
       <nav className="rb-section-tabs" aria-label={copy.tabsAria}>
         <button type="button" className={activeSection === "links" ? "active" : ""} onClick={() => setActiveSection("links")}>
@@ -613,6 +657,13 @@ export default function AdminLinksPageClient({
           onClick={() => setActiveSection("analytics")}
         >
           {copy.analyticsTab}
+        </button>
+        <button
+          type="button"
+          className={activeSection === "settings" ? "active" : ""}
+          onClick={() => setActiveSection("settings")}
+        >
+          {copy.settingsTab}
         </button>
       </nav>
 
@@ -639,52 +690,6 @@ export default function AdminLinksPageClient({
         ) : (
           <section className="rb-panel">
             <h2>{copy.globalStatsTitle}</h2>
-            <article className="rb-panel">
-              <h3>{copy.trackingSettings}</h3>
-              <div className="rb-form-grid">
-                <label className="inline-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={settings.trackingEnabled}
-                    onChange={(event) =>
-                      setSettings((current) => ({
-                        ...current,
-                        trackingEnabled: event.target.checked
-                      }))
-                    }
-                  />
-                  <span>{copy.trackingEnabled}</span>
-                </label>
-                <label className="inline-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={settings.landingEnabled}
-                    onChange={(event) =>
-                      setSettings((current) => ({
-                        ...current,
-                        landingEnabled: event.target.checked
-                      }))
-                    }
-                  />
-                  <span>{copy.landingEnabled}</span>
-                </label>
-                <label htmlFor="global_background_url">
-                  {copy.globalBackground}
-                  <input
-                    id="global_background_url"
-                    type="url"
-                    value={globalBackgroundUrl}
-                    placeholder="https://..."
-                    onChange={(event) => setGlobalBackgroundUrl(event.target.value)}
-                  />
-                </label>
-              </div>
-              <div className="rb-actions">
-                <button type="button" className="rb-primary" disabled={savingSettings} onClick={() => void saveSettings()}>
-                  {savingSettings ? copy.savingSettings : copy.saveSettings}
-                </button>
-              </div>
-            </article>
             <div className="rb-global-metrics">
               {statsCards.map((item) => (
                 <article key={item.label}>
@@ -724,6 +729,53 @@ export default function AdminLinksPageClient({
             </div>
           </section>
         )
+      ) : activeSection === "settings" ? (
+        <section className="rb-panel">
+          <h2>{copy.trackingSettings}</h2>
+          <div className="rb-form-grid">
+            <label className="inline-checkbox">
+              <input
+                type="checkbox"
+                checked={settings.trackingEnabled}
+                onChange={(event) =>
+                  setSettings((current) => ({
+                    ...current,
+                    trackingEnabled: event.target.checked
+                  }))
+                }
+              />
+              <span>{copy.trackingEnabled}</span>
+            </label>
+            <label className="inline-checkbox">
+              <input
+                type="checkbox"
+                checked={settings.landingEnabled}
+                onChange={(event) =>
+                  setSettings((current) => ({
+                    ...current,
+                    landingEnabled: event.target.checked
+                  }))
+                }
+              />
+              <span>{copy.landingEnabled}</span>
+            </label>
+            <label htmlFor="global_background_url">
+              {copy.globalBackground}
+              <input
+                id="global_background_url"
+                type="url"
+                value={globalBackgroundUrl}
+                placeholder="https://..."
+                onChange={(event) => setGlobalBackgroundUrl(event.target.value)}
+              />
+            </label>
+          </div>
+          <div className="rb-actions">
+            <button type="button" className="rb-primary" disabled={savingSettings} onClick={() => void saveSettings()}>
+              {savingSettings ? copy.savingSettings : copy.saveSettings}
+            </button>
+          </div>
+        </section>
       ) : (
         <>
           <section className="rb-toolbar">
@@ -931,7 +983,15 @@ export default function AdminLinksPageClient({
                 {copy.linkStatsTitle} /{activeLinkStats.slug}
               </h2>
               {loadingLinkStatsId === activeLinkStats.id ? (
-                <p className="rb-muted">{copy.loadingStats}</p>
+                <div className="rb-link-stats-loading-screen" aria-live="polite" aria-busy="true">
+                  <div className="rb-analytics-loader">
+                    <div className="rb-loader-ring" aria-hidden="true" />
+                    <p className="rb-loader-title">{copy.loadingStats}</p>
+                    <div className="rb-loader-progress" role="progressbar" aria-label={copy.loadingStats}>
+                      <span />
+                    </div>
+                  </div>
+                </div>
               ) : activeLinkAnalytics ? (
                 <AdminCharts
                   mode="rebrandly"

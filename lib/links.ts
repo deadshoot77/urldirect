@@ -309,6 +309,14 @@ const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 const ADMIN_SETTINGS_CACHE_TTL_MS = 60_000;
+const GLOBAL_ANALYTICS_CACHE_TTL_MS = 30_000;
+const DEFAULT_ANALYTICS_TIME_ZONE = "Europe/Paris";
+const GLOBAL_ANALYTICS_BATCH_SIZE = 500;
+const GLOBAL_ANALYTICS_MAX_ROWS = 10_000;
+const GLOBAL_ANALYTICS_MAX_DURATION_MS = 5_000;
+const LIST_STATS_RPC_BACKOFF_MS = 5 * 60_000;
+const LIST_STATS_RPC_TIMEOUT_MS = 4_000;
+const LINK_ANALYTICS_RPC_TIMEOUT_MS = 4_000;
 const SOCIAL_SOURCES = new Set([
   "facebook",
   "instagram",
@@ -331,6 +339,14 @@ let cachedRuntimeAdminSettings:
       expiresAt: number;
     }
   | null = null;
+let cachedRuntimeGlobalAnalytics:
+  | {
+      data: GlobalAnalyticsData;
+      expiresAt: number;
+      timeZone: string;
+    }
+  | null = null;
+let listStatsRpcDisabledUntilMs = 0;
 
 function toNumber(value: unknown): number {
   if (typeof value === "number") return value;
@@ -342,6 +358,10 @@ function toSafePositiveInt(value: number, fallback: number): number {
   if (!Number.isFinite(value)) return fallback;
   const normalized = Math.floor(value);
   return normalized >= 1 ? normalized : fallback;
+}
+
+function isStatementTimeoutError(error: Error): boolean {
+  return /statement timeout|canceling statement due to statement timeout|timed out after/i.test(error.message);
 }
 
 function toString(value: unknown, fallback = ""): string {
@@ -601,6 +621,51 @@ function formatTwoDigits(value: number): string {
   return String(value).padStart(2, "0");
 }
 
+function isValidIanaTimeZone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveAnalyticsTimeZone(timeZone?: string): string {
+  const normalized = toString(timeZone).trim();
+  if (normalized.length > 0 && isValidIanaTimeZone(normalized)) {
+    return normalized;
+  }
+  return DEFAULT_ANALYTICS_TIME_ZONE;
+}
+
+function createDayKeyFormatter(timeZone: string): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+}
+
+function toDayKey(epochMs: number, formatter: Intl.DateTimeFormat): string {
+  return formatter.format(new Date(epochMs));
+}
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([operation, timeoutPromise]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
 function startOfUtcHour(epochMs: number): number {
   const date = new Date(epochMs);
   date.setUTCMinutes(0, 0, 0);
@@ -661,8 +726,10 @@ function buildMonthsSeries(counter: Map<number, number>, start: number, points: 
   return output;
 }
 
-async function aggregateGlobalAnalytics(batchSize = 1000): Promise<AggregatedGlobalAnalyticsData> {
-  const safeBatchSize = Math.max(100, Math.min(batchSize, 2000));
+async function aggregateGlobalAnalytics(timeZone: string): Promise<AggregatedGlobalAnalyticsData> {
+  const safeBatchSize = GLOBAL_ANALYTICS_BATCH_SIZE;
+  const maxRows = GLOBAL_ANALYTICS_MAX_ROWS;
+  const deadlineAt = Date.now() + GLOBAL_ANALYTICS_MAX_DURATION_MS;
   const nowMs = Date.now();
   const utcHourEnd = startOfUtcHour(nowMs);
   const utcDayEnd = startOfUtcDay(nowMs);
@@ -674,8 +741,12 @@ async function aggregateGlobalAnalytics(batchSize = 1000): Promise<AggregatedGlo
   monthStartDate.setUTCMonth(monthStartDate.getUTCMonth() - 11);
   const utcMonthStart = monthStartDate.getTime();
 
-  const utcTodayStart = utcDayEnd;
-  const last7DaysStart = utcTodayStart - 6 * DAY_MS;
+  const dayKeyFormatter = createDayKeyFormatter(timeZone);
+  const todayDayKey = toDayKey(nowMs, dayKeyFormatter);
+  const last7DayKeys = new Set<string>();
+  for (let index = 0; index < 7; index += 1) {
+    last7DayKeys.add(toDayKey(nowMs - index * DAY_MS, dayKeyFormatter));
+  }
 
   let redirects = 0;
   let visits = 0;
@@ -691,7 +762,7 @@ async function aggregateGlobalAnalytics(batchSize = 1000): Promise<AggregatedGlo
   let lastClickAt: string | null = null;
   let lastClickAtMs = Number.NEGATIVE_INFINITY;
   let offset = 0;
-  let batchCount = 0;
+  let processedRows = 0;
 
   const linksCounter = new Map<string, number>();
   const countriesCounter = new Map<string, number>();
@@ -710,6 +781,10 @@ async function aggregateGlobalAnalytics(batchSize = 1000): Promise<AggregatedGlo
   const hourBreakdown = Array.from({ length: 24 }, () => 0);
 
   while (true) {
+    if (processedRows >= maxRows || Date.now() >= deadlineAt) {
+      break;
+    }
+
     const { data, error } = await getSupabaseAdminClient()
       .from("click_events")
       .select(
@@ -726,6 +801,7 @@ async function aggregateGlobalAnalytics(batchSize = 1000): Promise<AggregatedGlo
     if (rows.length === 0) {
       break;
     }
+    processedRows += rows.length;
 
     for (const row of rows) {
       const eventType = normalizeTrackingEventType(row.event_type);
@@ -784,10 +860,11 @@ async function aggregateGlobalAnalytics(batchSize = 1000): Promise<AggregatedGlo
           lastClickAt = new Date(eventAt).toISOString();
         }
 
-        if (eventAt >= utcTodayStart) {
+        const eventDayKey = toDayKey(eventAt, dayKeyFormatter);
+        if (eventDayKey === todayDayKey) {
           clicksToday += 1;
         }
-        if (eventAt >= last7DaysStart) {
+        if (last7DayKeys.has(eventDayKey)) {
           clicksLast7Days += 1;
         }
 
@@ -817,8 +894,7 @@ async function aggregateGlobalAnalytics(batchSize = 1000): Promise<AggregatedGlo
     }
 
     offset += safeBatchSize;
-    batchCount += 1;
-    if (batchCount > 2000) {
+    if (processedRows >= maxRows || Date.now() >= deadlineAt) {
       break;
     }
   }
@@ -880,17 +956,27 @@ async function aggregateGlobalAnalytics(batchSize = 1000): Promise<AggregatedGlo
   };
 }
 
-export async function getGlobalAnalyticsData(): Promise<GlobalAnalyticsData> {
+export async function getGlobalAnalyticsData(timeZone?: string): Promise<GlobalAnalyticsData> {
+  const nowMs = Date.now();
+  const resolvedTimeZone = resolveAnalyticsTimeZone(timeZone);
+  if (
+    cachedRuntimeGlobalAnalytics &&
+    cachedRuntimeGlobalAnalytics.expiresAt > nowMs &&
+    cachedRuntimeGlobalAnalytics.timeZone === resolvedTimeZone
+  ) {
+    return cachedRuntimeGlobalAnalytics.data;
+  }
+
   const [{ count, error }, aggregated] = await Promise.all([
     getSupabaseAdminClient().from("short_links").select("id", { head: true, count: "exact" }).eq("is_active", true),
-    aggregateGlobalAnalytics()
+    aggregateGlobalAnalytics(resolvedTimeZone)
   ]);
 
   if (error) {
     throw new Error(`getGlobalAnalyticsData total links failed: ${error.message}`);
   }
 
-  return {
+  const data: GlobalAnalyticsData = {
     totalLinks: toNumber(count ?? 0),
     clicksLast7Days: aggregated.clicksLast7Days,
     topLinks: aggregated.topLinks,
@@ -909,6 +995,14 @@ export async function getGlobalAnalyticsData(): Promise<GlobalAnalyticsData> {
     topLanguages: aggregated.topLanguages,
     topPlatforms: aggregated.topPlatforms
   };
+
+  cachedRuntimeGlobalAnalytics = {
+    data,
+    expiresAt: nowMs + GLOBAL_ANALYTICS_CACHE_TTL_MS,
+    timeZone: resolvedTimeZone
+  };
+
+  return data;
 }
 
 export async function getGlobalLinksStats(): Promise<GlobalLinksStats> {
@@ -1001,13 +1095,25 @@ export async function listShortLinksWithStats(page = 1, pageSize = 20): Promise<
   const safePage = toSafePositiveInt(page, 1);
   const safeSize = Math.min(100, toSafePositiveInt(pageSize, 20));
   const offset = (safePage - 1) * safeSize;
+  const nowMs = Date.now();
+  const shouldUseRpc = nowMs >= listStatsRpcDisabledUntilMs;
+  const totalPromise = getSupabaseAdminClient().from("short_links").select("id", { head: true, count: "exact" }).eq("is_active", true);
+
+  if (!shouldUseRpc) {
+    const { count, error: totalError } = await totalPromise;
+    return listShortLinksWithoutRpc(safePage, safeSize, totalError ? null : toNumber(count ?? 0));
+  }
 
   const [{ count, error: totalError }, rpcResult] = await Promise.all([
-    getSupabaseAdminClient().from("short_links").select("id", { head: true, count: "exact" }).eq("is_active", true),
-    runRpcList<ShortLinkListRow>("list_short_links_with_stats", {
-      p_limit: safeSize,
-      p_offset: offset
-    })
+    totalPromise,
+    withTimeout(
+      runRpcList<ShortLinkListRow>("list_short_links_with_stats", {
+        p_limit: safeSize,
+        p_offset: offset
+      }),
+      LIST_STATS_RPC_TIMEOUT_MS,
+      "list_short_links_with_stats"
+    )
       .then((rows) => ({ rows, error: null as Error | null }))
       .catch((error) => ({
         rows: [] as ShortLinkListRow[],
@@ -1016,7 +1122,12 @@ export async function listShortLinksWithStats(page = 1, pageSize = 20): Promise<
   ]);
 
   if (rpcResult.error) {
-    console.error("list_short_links_with_stats rpc failed; falling back to short_links table", rpcResult.error);
+    if (isStatementTimeoutError(rpcResult.error)) {
+      listStatsRpcDisabledUntilMs = nowMs + LIST_STATS_RPC_BACKOFF_MS;
+      console.warn("list_short_links_with_stats timed out; using short_links fallback for 5 minutes");
+    } else {
+      console.error("list_short_links_with_stats rpc failed; falling back to short_links table", rpcResult.error);
+    }
     return listShortLinksWithoutRpc(safePage, safeSize, totalError ? null : toNumber(count ?? 0));
   }
 
@@ -1227,7 +1338,89 @@ export async function getLinkHourBreakdown(linkId: string): Promise<LabelCount[]
   return mapLabelCounts(rows);
 }
 
-export async function getLinkAnalyticsData(linkId: string): Promise<LinkAnalyticsData> {
+function createEmptyLinkTimeSeries(granularity: "hours" | "days" | "months", points: number): TimeSeriesPoint[] {
+  const safePoints = Math.max(1, Math.floor(points));
+  if (granularity === "hours") {
+    const end = startOfUtcHour(Date.now());
+    const start = end - (safePoints - 1) * HOUR_MS;
+    return buildHoursSeries(new Map<number, number>(), start, end);
+  }
+  if (granularity === "months") {
+    const end = startOfUtcMonth(Date.now());
+    const startDate = new Date(end);
+    startDate.setUTCMonth(startDate.getUTCMonth() - (safePoints - 1));
+    return buildMonthsSeries(new Map<number, number>(), startDate.getTime(), safePoints);
+  }
+  const end = startOfUtcDay(Date.now());
+  const start = end - (safePoints - 1) * DAY_MS;
+  return buildDaysSeries(new Map<number, number>(), start, end);
+}
+
+function sumCurrentDayClicks(points: TimeSeriesPoint[], timeZone: string): number {
+  const formatter = createDayKeyFormatter(timeZone);
+  const today = toDayKey(Date.now(), formatter);
+  return points.reduce((total, point) => {
+    const bucketMs = Date.parse(point.bucketAt);
+    if (Number.isNaN(bucketMs)) return total;
+    return toDayKey(bucketMs, formatter) === today ? total + toNumber(point.clicks) : total;
+  }, 0);
+}
+
+async function safeLinkAnalyticsCall<T>(label: string, operation: Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await withTimeout(operation, LINK_ANALYTICS_RPC_TIMEOUT_MS, label);
+  } catch (error) {
+    console.error(`${label} fallback`, error);
+    return fallback;
+  }
+}
+
+export function createEmptyLinkAnalyticsData(): LinkAnalyticsData {
+  return {
+    overview: {
+      totalClicks: 0,
+      qrScans: 0,
+      clicksToday: 0,
+      lastClickAt: null,
+      uniqueClicks: 0,
+      nonUniqueClicks: 0,
+      visits: 0,
+      landingViews: 0,
+      humanClicks: 0,
+      redirects: 0,
+      directRedirects: 0,
+      botHits: 0,
+      prefetchHits: 0
+    },
+    timeseries: {
+      hours: createEmptyLinkTimeSeries("hours", 24),
+      days: createEmptyLinkTimeSeries("days", 30),
+      months: createEmptyLinkTimeSeries("months", 12)
+    },
+    worldMap: [],
+    topCities: [],
+    topRegions: [],
+    topDays: DAY_LABELS.map((label) => ({ label, clicks: 0 })),
+    popularHours: Array.from({ length: 24 }, (_, hour) => ({ label: `${formatTwoDigits(hour)}:00`, clicks: 0 })),
+    clickType: [
+      { label: "Visits", clicks: 0 },
+      { label: "Landing Views", clicks: 0 },
+      { label: "Human Clicks", clicks: 0 },
+      { label: "Redirects (human)", clicks: 0 },
+      { label: "Bots", clicks: 0 },
+      { label: "Prefetch", clicks: 0 }
+    ],
+    topSocialPlatforms: [],
+    topSources: [],
+    topBrowsers: [],
+    topDevices: [],
+    topLanguages: [],
+    topPlatforms: []
+  };
+}
+
+async function getLinkAnalyticsDataViaRpc(linkId: string, timeZone: string): Promise<LinkAnalyticsData> {
+  const fallback = createEmptyLinkAnalyticsData();
   const [
     overview,
     hoursSeries,
@@ -1245,34 +1438,39 @@ export async function getLinkAnalyticsData(linkId: string): Promise<LinkAnalytic
     topDays,
     popularHours
   ] = await Promise.all([
-    getLinkOverview(linkId),
-    getLinkTimeseries(linkId, "hours", 24),
-    getLinkTimeseries(linkId, "days", 30),
-    getLinkTimeseries(linkId, "months", 12),
-    getLinkTopDimension(linkId, "country", 12),
-    getLinkTopDimension(linkId, "city", 8),
-    getLinkTopDimension(linkId, "region", 8),
-    getLinkTopDimension(linkId, "source", 8),
-    getLinkTopDimension(linkId, "browser", 8),
-    getLinkTopDimension(linkId, "device", 6),
-    getLinkTopDimension(linkId, "language", 8),
-    getLinkTopDimension(linkId, "platform", 8),
-    getLinkTopDimension(linkId, "social", 8),
-    getLinkDayBreakdown(linkId),
-    getLinkHourBreakdown(linkId)
+    safeLinkAnalyticsCall("get_link_overview", getLinkOverview(linkId), fallback.overview),
+    safeLinkAnalyticsCall("get_link_timeseries(hours)", getLinkTimeseries(linkId, "hours", 24), fallback.timeseries.hours),
+    safeLinkAnalyticsCall("get_link_timeseries(days)", getLinkTimeseries(linkId, "days", 30), fallback.timeseries.days),
+    safeLinkAnalyticsCall("get_link_timeseries(months)", getLinkTimeseries(linkId, "months", 12), fallback.timeseries.months),
+    safeLinkAnalyticsCall("get_link_top_dimension(country)", getLinkTopDimension(linkId, "country", 12), fallback.worldMap),
+    safeLinkAnalyticsCall("get_link_top_dimension(city)", getLinkTopDimension(linkId, "city", 8), fallback.topCities),
+    safeLinkAnalyticsCall("get_link_top_dimension(region)", getLinkTopDimension(linkId, "region", 8), fallback.topRegions),
+    safeLinkAnalyticsCall("get_link_top_dimension(source)", getLinkTopDimension(linkId, "source", 8), fallback.topSources),
+    safeLinkAnalyticsCall("get_link_top_dimension(browser)", getLinkTopDimension(linkId, "browser", 8), fallback.topBrowsers),
+    safeLinkAnalyticsCall("get_link_top_dimension(device)", getLinkTopDimension(linkId, "device", 6), fallback.topDevices),
+    safeLinkAnalyticsCall("get_link_top_dimension(language)", getLinkTopDimension(linkId, "language", 8), fallback.topLanguages),
+    safeLinkAnalyticsCall("get_link_top_dimension(platform)", getLinkTopDimension(linkId, "platform", 8), fallback.topPlatforms),
+    safeLinkAnalyticsCall("get_link_top_dimension(social)", getLinkTopDimension(linkId, "social", 8), fallback.topSocialPlatforms),
+    safeLinkAnalyticsCall("get_link_day_breakdown", getLinkDayBreakdown(linkId), fallback.topDays),
+    safeLinkAnalyticsCall("get_link_hour_breakdown", getLinkHourBreakdown(linkId), fallback.popularHours)
   ]);
 
+  const normalizedOverview: LinkOverviewStats = {
+    ...overview,
+    clicksToday: sumCurrentDayClicks(hoursSeries, timeZone)
+  };
+
   const clickType: LabelCount[] = [
-    { label: "Visits", clicks: overview.visits },
-    { label: "Landing Views", clicks: overview.landingViews },
-    { label: "Human Clicks", clicks: overview.humanClicks },
-    { label: "Redirects (human)", clicks: overview.redirects },
-    { label: "Bots", clicks: overview.botHits },
-    { label: "Prefetch", clicks: overview.prefetchHits }
+    { label: "Visits", clicks: normalizedOverview.visits },
+    { label: "Landing Views", clicks: normalizedOverview.landingViews },
+    { label: "Human Clicks", clicks: normalizedOverview.humanClicks },
+    { label: "Redirects (human)", clicks: normalizedOverview.redirects },
+    { label: "Bots", clicks: normalizedOverview.botHits },
+    { label: "Prefetch", clicks: normalizedOverview.prefetchHits }
   ];
 
   return {
-    overview,
+    overview: normalizedOverview,
     timeseries: {
       hours: hoursSeries,
       days: daysSeries,
@@ -1291,6 +1489,16 @@ export async function getLinkAnalyticsData(linkId: string): Promise<LinkAnalytic
     topLanguages,
     topPlatforms
   };
+}
+
+export async function getLinkAnalyticsData(linkId: string, timeZone?: string): Promise<LinkAnalyticsData> {
+  const resolvedTimeZone = resolveAnalyticsTimeZone(timeZone);
+  try {
+    return await getLinkAnalyticsDataViaRpc(linkId, resolvedTimeZone);
+  } catch (error) {
+    console.error("getLinkAnalyticsData fallback to empty payload", error);
+    return createEmptyLinkAnalyticsData();
+  }
 }
 
 export async function isUniqueClick(linkId: string, ipHash: string): Promise<boolean> {
