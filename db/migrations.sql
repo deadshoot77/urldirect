@@ -621,6 +621,7 @@ to authenticated
 using (false)
 with check (false);
 
+drop function if exists public.get_admin_settings();
 create or replace function public.get_admin_settings()
 returns table (
   plan text,
