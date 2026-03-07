@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import AdminCharts from "@/components/admin-charts";
 import ChartErrorBoundary from "@/components/chart-error-boundary";
 import AdminLanguageToggle from "@/components/admin-language-toggle";
@@ -117,6 +117,7 @@ const words = {
     never: "Jamais",
     clicks: "redirections humaines",
     zeroStatsHint: "Stats a 0: verifie tracking actif + migration SQL a jour (db/migrations.sql).",
+    analyticsFallbackHint: "Analytics temporairement indisponibles, affichage des valeurs de secours.",
     chartsUnavailable: "Impossible d'afficher ce graphique pour le moment."
   },
   en: {
@@ -202,6 +203,7 @@ const words = {
     never: "Never",
     clicks: "human redirects",
     zeroStatsHint: "Zero stats: verify tracking enabled and latest SQL migration applied (db/migrations.sql).",
+    analyticsFallbackHint: "Analytics are temporarily unavailable, showing fallback values.",
     chartsUnavailable: "Unable to render this chart right now."
   }
 } as const;
@@ -241,6 +243,16 @@ function formatNumber(value: number, lang: AdminLang): string {
   return new Intl.NumberFormat(lang === "fr" ? "fr-FR" : "en-US").format(value);
 }
 
+function buildLinkListStatsMap(links: PaginatedShortLinks): Record<string, LinkListStat> {
+  return links.items.reduce<Record<string, LinkListStat>>((output, link) => {
+    output[link.id] = {
+      clicksReceived: link.clicksReceived,
+      lastClickAt: link.lastClickAt
+    };
+    return output;
+  }, {});
+}
+
 function StatsList({
   title,
   items,
@@ -278,9 +290,10 @@ export default function AdminLinksPageClient({
   const [links, setLinks] = useState<PaginatedShortLinks>(initialLinks);
   const [globalAnalytics, setGlobalAnalytics] = useState<GlobalAnalyticsData>(initialGlobalAnalytics);
   const [globalAnalyticsLoaded, setGlobalAnalyticsLoaded] = useState(initialGlobalAnalyticsLoaded);
+  const [globalAnalyticsFallback, setGlobalAnalyticsFallback] = useState(false);
   const [settings, setSettings] = useState<AdminSettings>(initialSettings);
   const [linkAnalytics, setLinkAnalytics] = useState<Record<string, LinkAnalyticsData>>({});
-  const [linkListStats, setLinkListStats] = useState<Record<string, LinkListStat>>({});
+  const [linkListStats, setLinkListStats] = useState<Record<string, LinkListStat>>(() => buildLinkListStatsMap(initialLinks));
   const [activeLinkStats, setActiveLinkStats] = useState<{
     id: string;
     slug: string;
@@ -305,6 +318,7 @@ export default function AdminLinksPageClient({
   const [loadedAnalyticsRange, setLoadedAnalyticsRange] = useState<AnalyticsRange | null>(
     initialGlobalAnalyticsLoaded ? "today" : null
   );
+  const visibleLinkStatsRequestsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     setOrigin(window.location.origin);
@@ -321,6 +335,28 @@ export default function AdminLinksPageClient({
   }, [settings.globalBackgroundUrl]);
 
   useEffect(() => {
+    const nextStats = buildLinkListStatsMap(links);
+    if (Object.keys(nextStats).length === 0) {
+      return;
+    }
+
+    setLinkListStats((current) => {
+      let changed = false;
+      const merged = { ...current };
+
+      for (const [id, stat] of Object.entries(nextStats)) {
+        const previous = current[id];
+        if (!previous || previous.clicksReceived !== stat.clicksReceived || previous.lastClickAt !== stat.lastClickAt) {
+          merged[id] = stat;
+          changed = true;
+        }
+      }
+
+      return changed ? merged : current;
+    });
+  }, [links]);
+
+  useEffect(() => {
     if (activeSection !== "analytics" || loadingAnalyticsData) {
       return;
     }
@@ -335,12 +371,17 @@ export default function AdminLinksPageClient({
       return;
     }
 
-    const missingIds = links.items.map((link) => link.id).filter((id) => !linkListStats[id]);
+    const missingIds = links.items
+      .map((link) => link.id)
+      .filter((id) => !linkListStats[id] && !visibleLinkStatsRequestsRef.current.has(id));
     if (missingIds.length === 0) {
       return;
     }
 
     let cancelled = false;
+    for (const id of missingIds) {
+      visibleLinkStatsRequestsRef.current.add(id);
+    }
 
     async function loadVisibleLinkStats() {
       try {
@@ -368,6 +409,10 @@ export default function AdminLinksPageClient({
       } catch (error) {
         if (!cancelled) {
           console.error("visible link stats fallback", error);
+        }
+      } finally {
+        for (const id of missingIds) {
+          visibleLinkStatsRequestsRef.current.delete(id);
         }
       }
     }
@@ -460,10 +505,7 @@ export default function AdminLinksPageClient({
 
   function formatLinkClicks(linkId: string, fallbackValue: number): string {
     const loaded = linkListStats[linkId];
-    if (!loaded) {
-      return "...";
-    }
-    return formatNumber(loaded.clicksReceived ?? fallbackValue, lang);
+    return formatNumber(loaded?.clicksReceived ?? fallbackValue, lang);
   }
 
   function showToast(message: string, kind: TopToastKind = "info") {
@@ -515,6 +557,7 @@ export default function AdminLinksPageClient({
         | {
             links?: PaginatedShortLinks;
             globalAnalytics?: GlobalAnalyticsData;
+            globalAnalyticsFallback?: boolean;
             settings?: AdminSettings;
             error?: string;
           }
@@ -528,6 +571,7 @@ export default function AdminLinksPageClient({
       setSettings(payload.settings);
       if (payload.globalAnalytics) {
         setGlobalAnalytics(payload.globalAnalytics);
+        setGlobalAnalyticsFallback(Boolean(payload.globalAnalyticsFallback));
         setGlobalAnalyticsLoaded(true);
         setLoadedAnalyticsRange(requestAnalyticsRange);
       }
@@ -666,6 +710,7 @@ export default function AdminLinksPageClient({
       const payload = (await response.json().catch(() => null)) as
         | {
             analytics?: LinkAnalyticsData;
+            analyticsFallback?: boolean;
             error?: string;
           }
         | null;
@@ -676,6 +721,9 @@ export default function AdminLinksPageClient({
         ...current,
         [linkId]: payload.analytics as LinkAnalyticsData
       }));
+      if (payload.analyticsFallback) {
+        showToast(copy.analyticsFallbackHint, "info");
+      }
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Failed to fetch link analytics", "error");
     } finally {
@@ -764,7 +812,7 @@ export default function AdminLinksPageClient({
 
       {loading && !(activeSection === "analytics" && !globalAnalyticsLoaded) ? <p className="rb-feedback">{copy.refreshLinks}</p> : null}
       {!settings.trackingEnabled ? <p className="rb-feedback">{copy.trackingDisabledHint}</p> : null}
-      {settings.trackingEnabled && globalAnalyticsLoaded && totalTrackedEvents === 0 ? (
+      {settings.trackingEnabled && globalAnalyticsLoaded && !globalAnalyticsFallback && totalTrackedEvents === 0 ? (
         <p className="rb-feedback">{copy.zeroStatsHint}</p>
       ) : null}
 
@@ -803,6 +851,7 @@ export default function AdminLinksPageClient({
                 </select>
               </label>
             </div>
+            {globalAnalyticsFallback ? <p className="rb-feedback">{copy.analyticsFallbackHint}</p> : null}
             <div className="rb-global-metrics">
               {statsCards.map((item) => (
                 <article key={item.label}>
@@ -1000,7 +1049,7 @@ export default function AdminLinksPageClient({
                     links.items.map((link) => (
                       <tr key={link.id}>
                         <td>
-                          <Link href={`/admin/links/${link.id}`} className="rb-link-title">
+                          <Link href={`/admin/links/${link.id}`} prefetch={false} className="rb-link-title">
                             /{link.slug}
                           </Link>
                           {link.tags.length > 0 ? (
@@ -1048,7 +1097,7 @@ export default function AdminLinksPageClient({
               {links.items.map((link) => (
                 <article key={link.id} className="rb-card">
                   <div className="rb-card-head">
-                    <Link href={`/admin/links/${link.id}`} className="rb-link-title">
+                    <Link href={`/admin/links/${link.id}`} prefetch={false} className="rb-link-title">
                       /{link.slug}
                     </Link>
                     <button type="button" onClick={() => void toggleFavorite(link.id, link.isFavorite)}>
@@ -1083,7 +1132,7 @@ export default function AdminLinksPageClient({
                     >
                       {deletingLinkId === link.id ? copy.deletingLink : copy.deleteLink}
                     </button>
-                    <Link href={`/admin/links/${link.id}`} className="rb-button-link">
+                    <Link href={`/admin/links/${link.id}`} prefetch={false} className="rb-button-link">
                       {copy.open}
                     </Link>
                   </div>

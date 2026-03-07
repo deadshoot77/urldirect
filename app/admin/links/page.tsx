@@ -4,7 +4,7 @@ import { isAdminAuthenticated } from "@/lib/auth";
 import {
   createEmptyGlobalAnalyticsData,
   getAdminSettings,
-  listShortLinksPage,
+  listShortLinksWithStats,
   type PaginatedShortLinks
 } from "@/lib/links";
 import type { AdminSettings } from "@/lib/types";
@@ -48,7 +48,7 @@ export default async function AdminLinksPage({ searchParams }: LinksPageProps) {
 
   try {
     const [loadedLinks, loadedSettings] = await Promise.all([
-      listShortLinksPage(safePage, safePageSize),
+      listShortLinksWithStats(safePage, safePageSize),
       getAdminSettings({ includeUsage: false })
     ]);
     links = loadedLinks;

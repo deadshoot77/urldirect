@@ -57,15 +57,21 @@ export async function GET(request: NextRequest, { params }: Params) {
       return NextResponse.json({ link });
     }
 
+    let analyticsFallback = false;
     const analytics = await withTimeout(
       getLinkAnalyticsData(resolved.id, timeZone),
       LINK_ANALYTICS_TIMEOUT_MS,
       "getLinkAnalyticsData"
     ).catch((error) => {
-      console.error("link analytics route fallback", error);
+      analyticsFallback = true;
+      console.error("link analytics route fallback to empty payload", {
+        linkId: resolved.id,
+        timeZone: timeZone ?? "default",
+        error: error instanceof Error ? error.message : error
+      });
       return createEmptyLinkAnalyticsData();
     });
-    return NextResponse.json({ link, analytics });
+    return NextResponse.json({ link, analytics, analyticsFallback });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to fetch link" },

@@ -1,7 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import LinkDetailPageClient from "@/components/link-detail-page-client";
 import { isAdminAuthenticated } from "@/lib/auth";
-import { getLinkAnalyticsData, getShortLinkById } from "@/lib/links";
+import { getShortLinkById } from "@/lib/links";
 
 export const dynamic = "force-dynamic";
 
@@ -22,7 +22,5 @@ export default async function LinkDetailPage({ params }: LinkDetailPageProps) {
     notFound();
   }
 
-  const analytics = await getLinkAnalyticsData(link.id);
-
-  return <LinkDetailPageClient initialLink={link} initialAnalytics={analytics} />;
+  return <LinkDetailPageClient initialLink={link} initialAnalytics={null} />;
 }

@@ -11,8 +11,54 @@ import type { DeepLinksConfig, LandingMode, RoutingRule, ShortLink } from "@/lib
 
 interface LinkDetailPageClientProps {
   initialLink: ShortLink;
-  initialAnalytics: LinkAnalyticsData;
+  initialAnalytics?: LinkAnalyticsData | null;
 }
+
+const EMPTY_LINK_ANALYTICS: LinkAnalyticsData = {
+  overview: {
+    totalClicks: 0,
+    qrScans: 0,
+    clicksToday: 0,
+    lastClickAt: null,
+    uniqueClicks: 0,
+    nonUniqueClicks: 0,
+    visits: 0,
+    landingViews: 0,
+    humanClicks: 0,
+    redirects: 0,
+    directRedirects: 0,
+    botHits: 0,
+    prefetchHits: 0
+  },
+  timeseries: {
+    hours: [],
+    days: [],
+    months: []
+  },
+  worldMap: [],
+  topCities: [],
+  topRegions: [],
+  topDays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((label) => ({ label, clicks: 0 })),
+  popularHours: Array.from({ length: 24 }, (_, hour) => ({
+    label: `${String(hour).padStart(2, "0")}:00`,
+    clicks: 0
+  })),
+  clickType: [
+    { label: "Visits (human)", clicks: 0 },
+    { label: "Landing Views", clicks: 0 },
+    { label: "Human Clicks", clicks: 0 },
+    { label: "Redirects (human)", clicks: 0 },
+    { label: "Redirects (legacy)", clicks: 0 },
+    { label: "Bots", clicks: 0 },
+    { label: "Prefetch", clicks: 0 }
+  ],
+  topSocialPlatforms: [],
+  topSources: [],
+  topBrowsers: [],
+  topDevices: [],
+  topLanguages: [],
+  topPlatforms: []
+};
 
 const words = {
   fr: {
@@ -64,6 +110,8 @@ const words = {
     copiedClipboard: "Copie dans le presse-papiers",
     invalidRoutingJson: "JSON de routage invalide",
     invalidRetargetingJson: "JSON de retargeting invalide",
+    loadingAnalytics: "Chargement analytics...",
+    analyticsUnavailable: "Analytics indisponibles pour le moment.",
     visits: "Visites",
     landingViews: "Vues landing",
     humanClicks: "Clics humains",
@@ -122,6 +170,8 @@ const words = {
     copiedClipboard: "Copied to clipboard",
     invalidRoutingJson: "Invalid routing rules JSON",
     invalidRetargetingJson: "Invalid retargeting JSON",
+    loadingAnalytics: "Loading analytics...",
+    analyticsUnavailable: "Analytics are unavailable right now.",
     visits: "Visits",
     landingViews: "Landing views",
     humanClicks: "Human clicks",
@@ -213,7 +263,9 @@ function toErrorMessage(payload: unknown, fallback: string): string {
 export default function LinkDetailPageClient({ initialLink, initialAnalytics }: LinkDetailPageClientProps) {
   const router = useRouter();
   const [link, setLink] = useState<ShortLink>(initialLink);
-  const [analytics] = useState<LinkAnalyticsData>(initialAnalytics);
+  const [analytics, setAnalytics] = useState<LinkAnalyticsData | null>(initialAnalytics ?? null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(!initialAnalytics);
+  const [analyticsFallback, setAnalyticsFallback] = useState(false);
   const [toasts, setToasts] = useState<TopToastState[]>([]);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -229,11 +281,18 @@ export default function LinkDetailPageClient({ initialLink, initialAnalytics }: 
   const [utmContent, setUtmContent] = useState("");
   const [utmTerm, setUtmTerm] = useState("");
   const [origin, setOrigin] = useState("");
+  const [clientTimeZone, setClientTimeZone] = useState("Europe/Paris");
+  const [clientTimeZoneReady, setClientTimeZoneReady] = useState(false);
 
   useEffect(() => {
     setOrigin(window.location.origin);
     const stored = normalizeAdminLang(window.localStorage.getItem(ADMIN_LANG_STORAGE_KEY));
     setLang(stored);
+    const resolvedTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (resolvedTimeZone) {
+      setClientTimeZone(resolvedTimeZone);
+    }
+    setClientTimeZoneReady(true);
   }, []);
 
   useEffect(() => {
@@ -241,8 +300,64 @@ export default function LinkDetailPageClient({ initialLink, initialAnalytics }: 
     setBackgroundUrl(link.backgroundUrl ?? "");
   }, [link.backgroundUrl, link.landingMode]);
 
+  useEffect(() => {
+    if (initialAnalytics || !clientTimeZoneReady) {
+      return;
+    }
+
+    let cancelled = false;
+    setAnalyticsLoading(true);
+    setAnalyticsFallback(false);
+
+    async function loadAnalytics() {
+      try {
+        const timeZoneParam = encodeURIComponent(clientTimeZone);
+        const response = await fetch(`/api/admin/links/${encodeURIComponent(link.id)}?includeAnalytics=1&tz=${timeZoneParam}`, {
+          cache: "no-store",
+          credentials: "include"
+        });
+        const payload = (await response.json().catch(() => null)) as
+          | {
+              analytics?: LinkAnalyticsData;
+              analyticsFallback?: boolean;
+              error?: string;
+            }
+          | null;
+
+        if (!response.ok || !payload?.analytics) {
+          throw new Error(toErrorMessage(payload, "Failed to fetch link analytics"));
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        setAnalytics(payload.analytics);
+        setAnalyticsFallback(Boolean(payload.analyticsFallback));
+      } catch (error) {
+        console.error("link detail analytics fetch fallback", error);
+        if (cancelled) {
+          return;
+        }
+        setAnalytics(EMPTY_LINK_ANALYTICS);
+        setAnalyticsFallback(true);
+      } finally {
+        if (!cancelled) {
+          setAnalyticsLoading(false);
+        }
+      }
+    }
+
+    void loadAnalytics();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [clientTimeZone, clientTimeZoneReady, initialAnalytics, link.id]);
+
   const copy = words[lang];
   const shortUrl = `${origin}/${link.slug}`;
+  const analyticsData = analytics ?? EMPTY_LINK_ANALYTICS;
 
   const qrUrl = useMemo(() => {
     return `https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=${encodeURIComponent(shortUrl)}`;
@@ -262,7 +377,7 @@ export default function LinkDetailPageClient({ initialLink, initialAnalytics }: 
     }
   }, [link.destinationUrl, utmCampaign, utmContent, utmMedium, utmSource, utmTerm]);
 
-  const bestHours = useMemo(() => getTopShareHours(analytics.popularHours), [analytics.popularHours]);
+  const bestHours = useMemo(() => getTopShareHours(analyticsData.popularHours), [analyticsData.popularHours]);
 
   function showToast(message: string, kind: TopToastKind = "info") {
     setToasts((current) => {
@@ -539,24 +654,39 @@ export default function LinkDetailPageClient({ initialLink, initialAnalytics }: 
 
           <section className="rb-panel">
             <h2>{copy.report}</h2>
-            <AdminCharts
-              mode="rebrandly"
-              lang={lang}
-              overview={analytics.overview}
-              timeseries={analytics.timeseries}
-              worldMap={analytics.worldMap}
-              topCities={analytics.topCities}
-              topRegions={analytics.topRegions}
-              topDays={analytics.topDays}
-              popularHours={analytics.popularHours}
-              clickType={analytics.clickType}
-              topSocialPlatforms={analytics.topSocialPlatforms}
-              topSources={analytics.topSources}
-              topBrowsers={analytics.topBrowsers}
-              topDevices={analytics.topDevices}
-              topLanguages={analytics.topLanguages}
-              topPlatforms={analytics.topPlatforms}
-            />
+            {analyticsLoading ? (
+              <div className="rb-link-stats-loading-screen" aria-live="polite" aria-busy="true">
+                <div className="rb-analytics-loader">
+                  <div className="rb-loader-ring" aria-hidden="true" />
+                  <p className="rb-loader-title">{copy.loadingAnalytics}</p>
+                  <div className="rb-loader-progress" role="progressbar" aria-label={copy.loadingAnalytics}>
+                    <span />
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
+                {analyticsFallback ? <p className="rb-feedback">{copy.analyticsUnavailable}</p> : null}
+                <AdminCharts
+                  mode="rebrandly"
+                  lang={lang}
+                  overview={analyticsData.overview}
+                  timeseries={analyticsData.timeseries}
+                  worldMap={analyticsData.worldMap}
+                  topCities={analyticsData.topCities}
+                  topRegions={analyticsData.topRegions}
+                  topDays={analyticsData.topDays}
+                  popularHours={analyticsData.popularHours}
+                  clickType={analyticsData.clickType}
+                  topSocialPlatforms={analyticsData.topSocialPlatforms}
+                  topSources={analyticsData.topSources}
+                  topBrowsers={analyticsData.topBrowsers}
+                  topDevices={analyticsData.topDevices}
+                  topLanguages={analyticsData.topLanguages}
+                  topPlatforms={analyticsData.topPlatforms}
+                />
+              </>
+            )}
           </section>
         </div>
 
@@ -585,7 +715,9 @@ export default function LinkDetailPageClient({ initialLink, initialAnalytics }: 
 
           <article className="rb-panel">
             <h3>{copy.bestShareTime}</h3>
-            {bestHours.length === 0 ? (
+            {analyticsLoading ? (
+              <p className="rb-muted">{copy.loadingAnalytics}</p>
+            ) : bestHours.length === 0 ? (
               <p className="rb-muted">{copy.notEnoughData}</p>
             ) : (
               <ul className="rb-best-hours">
@@ -598,40 +730,44 @@ export default function LinkDetailPageClient({ initialLink, initialAnalytics }: 
 
           <article className="rb-panel">
             <h3>Funnel</h3>
-            <ul className="rb-geo-list">
-              <li>
-                <span>{copy.visits}</span>
-                <strong>{analytics.overview.visits}</strong>
-              </li>
-              <li>
-                <span>{copy.landingViews}</span>
-                <strong>{analytics.overview.landingViews}</strong>
-              </li>
-              <li>
-                <span>{copy.humanClicks}</span>
-                <strong>{analytics.overview.humanClicks}</strong>
-              </li>
-              <li>
-                <span>{copy.redirects}</span>
-                <strong>{analytics.overview.redirects}</strong>
-              </li>
-              <li>
-                <span>{copy.uniqueHumanRedirects}</span>
-                <strong>{analytics.overview.uniqueClicks}</strong>
-              </li>
-              <li>
-                <span>{copy.nonUniqueHumanRedirects}</span>
-                <strong>{analytics.overview.nonUniqueClicks}</strong>
-              </li>
-              <li>
-                <span>{copy.botHits}</span>
-                <strong>{analytics.overview.botHits}</strong>
-              </li>
-              <li>
-                <span>{copy.prefetchHits}</span>
-                <strong>{analytics.overview.prefetchHits}</strong>
-              </li>
-            </ul>
+            {analyticsLoading ? (
+              <p className="rb-muted">{copy.loadingAnalytics}</p>
+            ) : (
+              <ul className="rb-geo-list">
+                <li>
+                  <span>{copy.visits}</span>
+                  <strong>{analyticsData.overview.visits}</strong>
+                </li>
+                <li>
+                  <span>{copy.landingViews}</span>
+                  <strong>{analyticsData.overview.landingViews}</strong>
+                </li>
+                <li>
+                  <span>{copy.humanClicks}</span>
+                  <strong>{analyticsData.overview.humanClicks}</strong>
+                </li>
+                <li>
+                  <span>{copy.redirects}</span>
+                  <strong>{analyticsData.overview.redirects}</strong>
+                </li>
+                <li>
+                  <span>{copy.uniqueHumanRedirects}</span>
+                  <strong>{analyticsData.overview.uniqueClicks}</strong>
+                </li>
+                <li>
+                  <span>{copy.nonUniqueHumanRedirects}</span>
+                  <strong>{analyticsData.overview.nonUniqueClicks}</strong>
+                </li>
+                <li>
+                  <span>{copy.botHits}</span>
+                  <strong>{analyticsData.overview.botHits}</strong>
+                </li>
+                <li>
+                  <span>{copy.prefetchHits}</span>
+                  <strong>{analyticsData.overview.prefetchHits}</strong>
+                </li>
+              </ul>
+            )}
           </article>
 
           <article className="rb-panel">

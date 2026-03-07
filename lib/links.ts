@@ -556,7 +556,7 @@ function isVerifiedHumanRedirectRow(
   requestMethod: string,
   metadata: unknown
 ): boolean {
-  if (!isHumanRedirectEvent(eventType, trafficCategory, requestMethod)) {
+  if (eventType !== "redirect" || requestMethod !== "GET" || trafficCategory !== "human") {
     return false;
   }
   const redirectPath = getRedirectPath(metadata);
@@ -595,13 +595,13 @@ async function getLinkListStatsFromEvents(
   const todayKey = toDayKey(Date.now(), formatter);
 
   await scanClickEvents<ClickEventStatRow>({
-    select: "link_id, created_at, event_type, traffic_category, request_method, is_bot, is_prefetch",
+    select: "link_id, created_at, event_type, traffic_category, request_method, is_bot, is_prefetch, metadata",
     applyFilters: (query) =>
       query
         .in("link_id", linkIds)
         .eq("event_type", "redirect")
         .eq("request_method", "GET")
-        .or("traffic_category.eq.human,traffic_category.eq.unknown,traffic_category.is.null"),
+        .eq("traffic_category", "human"),
     onBatch: (rows) => {
       for (const row of rows) {
         const currentLinkId = toStringOrNull(row.link_id);
@@ -610,6 +610,13 @@ async function getLinkListStatsFromEvents(
         }
         const currentStats = stats.get(currentLinkId);
         if (!currentStats) {
+          continue;
+        }
+
+        const eventType = normalizeTrackingEventType(row.event_type);
+        const trafficCategory = normalizeTrafficCategory(row.traffic_category, Boolean(row.is_bot), Boolean(row.is_prefetch));
+        const requestMethod = toString(row.request_method || "GET").trim().toUpperCase() || "GET";
+        if (!isVerifiedHumanRedirectRow(eventType, trafficCategory, requestMethod, row.metadata)) {
           continue;
         }
 
@@ -1467,7 +1474,9 @@ async function aggregateGlobalAnalytics(window: AnalyticsWindow): Promise<Aggreg
   const monthPoints = Math.max(1, monthDiff + 1);
 
   let redirects = 0;
+  let redirectCandidates = 0;
   let visits = 0;
+  let humanVisits = 0;
   let landingViews = 0;
   let humanClicks = 0;
   let directRedirects = 0;
@@ -1479,7 +1488,6 @@ async function aggregateGlobalAnalytics(window: AnalyticsWindow): Promise<Aggreg
   let nonUniqueClicks = 0;
   let lastClickAt: string | null = null;
   let lastClickAtMs = Number.NEGATIVE_INFINITY;
-  let offset = 0;
 
   const linksCounter = new Map<string, number>();
   const countriesCounter = new Map<string, number>();
@@ -1509,6 +1517,9 @@ async function aggregateGlobalAnalytics(window: AnalyticsWindow): Promise<Aggreg
 
         if (eventType === "visit") {
           visits += 1;
+          if (isHumanRedirectTrafficCategory(trafficCategory)) {
+            humanVisits += 1;
+          }
         } else if (eventType === "landing_view") {
           landingViews += 1;
         } else if (eventType === "human_click") {
@@ -1519,6 +1530,10 @@ async function aggregateGlobalAnalytics(window: AnalyticsWindow): Promise<Aggreg
           botHits += 1;
         } else if (trafficCategory === "prefetch") {
           prefetchHits += 1;
+        }
+
+        if (isHumanRedirectEvent(eventType, trafficCategory, requestMethod)) {
+          redirectCandidates += 1;
         }
 
         const isHumanRedirect = isVerifiedHumanRedirectRow(eventType, trafficCategory, requestMethod, row.metadata);
@@ -1594,6 +1609,7 @@ async function aggregateGlobalAnalytics(window: AnalyticsWindow): Promise<Aggreg
 
   clicksToday = redirects;
   clicksLast7Days = redirects;
+  const legacyRedirects = Math.max(0, redirectCandidates - redirects);
 
   const overview: LinkOverviewStats = {
     totalClicks: redirects,
@@ -1626,10 +1642,11 @@ async function aggregateGlobalAnalytics(window: AnalyticsWindow): Promise<Aggreg
     topDays,
     popularHours,
     clickType: [
-      { label: "Visits", clicks: visits },
+      { label: "Visits (human)", clicks: humanVisits },
       { label: "Landing Views", clicks: landingViews },
       { label: "Human Clicks", clicks: humanClicks },
       { label: "Redirects (human)", clicks: redirects },
+      { label: "Redirects (legacy)", clicks: legacyRedirects },
       { label: "Bots", clicks: botHits },
       { label: "Prefetch", clicks: prefetchHits }
     ],
@@ -1739,6 +1756,7 @@ function mapShortLinkListItem(
   };
 }
 
+// Intentionally lightweight; admin surfaces should prefer listShortLinksWithStats.
 export async function listShortLinksPage(page = 1, pageSize = 20): Promise<PaginatedShortLinks> {
   const safePage = toSafePositiveInt(page, 1);
   const safeSize = Math.min(100, toSafePositiveInt(pageSize, 20));
@@ -1780,7 +1798,8 @@ export async function listShortLinksPage(page = 1, pageSize = 20): Promise<Pagin
 async function listShortLinksWithoutRpc(
   safePage: number,
   safeSize: number,
-  knownTotal: number | null
+  knownTotal: number | null,
+  timeZone: string
 ): Promise<PaginatedShortLinks> {
   const offset = (safePage - 1) * safeSize;
   const { data, error } = await getSupabaseAdminClient()
@@ -1797,7 +1816,7 @@ async function listShortLinksWithoutRpc(
   const rows = (data ?? []) as ShortLinkListBaseRow[];
   const statsByLinkId = await getLinkListStatsFromEvents(
     rows.map((row) => row.id),
-    DEFAULT_ANALYTICS_TIME_ZONE
+    timeZone
   );
 
   let safeTotal = knownTotal;
@@ -1814,7 +1833,7 @@ async function listShortLinksWithoutRpc(
     }
   }
 
-  const items = rows.map((row, index) =>
+  const items = rows.map((row) =>
     mapShortLinkListItem({
       ...row,
       ...(statsByLinkId.get(row.id) ?? {
@@ -1835,12 +1854,13 @@ async function listShortLinksWithoutRpc(
   };
 }
 
-export async function listShortLinksWithStats(page = 1, pageSize = 20): Promise<PaginatedShortLinks> {
+export async function listShortLinksWithStats(page = 1, pageSize = 20, timeZone?: string): Promise<PaginatedShortLinks> {
   const safePage = toSafePositiveInt(page, 1);
   const safeSize = Math.min(100, toSafePositiveInt(pageSize, 20));
+  const resolvedTimeZone = resolveAnalyticsTimeZone(timeZone);
   const totalPromise = getSupabaseAdminClient().from("short_links").select("id", { head: true, count: "exact" }).eq("is_active", true);
   const { count, error: totalError } = await totalPromise;
-  return listShortLinksWithoutRpc(safePage, safeSize, totalError ? null : toNumber(count ?? 0));
+  return listShortLinksWithoutRpc(safePage, safeSize, totalError ? null : toNumber(count ?? 0), resolvedTimeZone);
 }
 
 export async function getShortLinkById(id: string): Promise<ShortLink | null> {

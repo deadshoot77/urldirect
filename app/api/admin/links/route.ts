@@ -5,7 +5,7 @@ import {
   createShortLink,
   getAdminSettings,
   getGlobalAnalyticsData,
-  listShortLinksPage
+  listShortLinksWithStats
 } from "@/lib/links";
 import { shortLinkCreateSchema } from "@/lib/validation";
 
@@ -45,11 +45,12 @@ export async function GET(request: NextRequest) {
 
   try {
     const [links, settings] = await Promise.all([
-      listShortLinksPage(page, pageSize),
+      listShortLinksWithStats(page, pageSize, timeZone),
       getAdminSettings({ includeUsage: false })
     ]);
 
     let globalAnalytics = null;
+    let globalAnalyticsFallback = false;
     if (includeAnalytics) {
       try {
         globalAnalytics = await withTimeout(
@@ -61,7 +62,14 @@ export async function GET(request: NextRequest) {
           "getGlobalAnalyticsData"
         );
       } catch (error) {
-        console.error("admin links analytics fallback", error);
+        globalAnalyticsFallback = true;
+        console.error("admin links analytics fallback to empty payload", {
+          page,
+          pageSize,
+          range: range ?? "today",
+          timeZone: timeZone ?? "default",
+          error: error instanceof Error ? error.message : error
+        });
         globalAnalytics = createEmptyGlobalAnalyticsData(links.total);
       }
     }
@@ -69,7 +77,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       links,
       settings,
-      ...(includeAnalytics ? { globalAnalytics } : {})
+      ...(includeAnalytics ? { globalAnalytics, globalAnalyticsFallback } : {})
     });
   } catch (error) {
     return NextResponse.json(
