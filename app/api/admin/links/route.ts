@@ -2,7 +2,6 @@ import { NextResponse, type NextRequest } from "next/server";
 import { isAdminRequest } from "@/lib/auth";
 import { loadAdminLinksPageData } from "@/lib/admin-links-page-data";
 import {
-  createEmptyGlobalAnalyticsData,
   createShortLink,
   getAdminSettings,
   getGlobalAnalyticsData
@@ -12,7 +11,7 @@ import { shortLinkCreateSchema } from "@/lib/validation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-const GLOBAL_ANALYTICS_TIMEOUT_MS = 8_000;
+const GLOBAL_ANALYTICS_TIMEOUT_MS = 20_000;
 
 const DEFAULT_ADMIN_SETTINGS: AdminSettings = {
   plan: "pro",
@@ -89,7 +88,7 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    let globalAnalytics = null;
+    let globalAnalytics: Awaited<ReturnType<typeof getGlobalAnalyticsData>> | null = null;
     let globalAnalyticsFallback = false;
     if (includeAnalytics) {
       try {
@@ -110,7 +109,6 @@ export async function GET(request: NextRequest) {
           timeZone: timeZone ?? "default",
           error: error instanceof Error ? error.message : error
         });
-        globalAnalytics = createEmptyGlobalAnalyticsData(linksData.links.total);
       }
     }
 

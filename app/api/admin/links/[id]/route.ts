@@ -1,7 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isAdminRequest } from "@/lib/auth";
 import {
-  createEmptyLinkAnalyticsData,
   deleteShortLink,
   getLinkAnalyticsData,
   getShortLinkById,
@@ -11,7 +10,7 @@ import { shortLinkPatchSchema } from "@/lib/validation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-const LINK_ANALYTICS_TIMEOUT_MS = 8_000;
+const LINK_ANALYTICS_TIMEOUT_MS = 20_000;
 
 interface Params {
   params: Promise<{
@@ -69,7 +68,7 @@ export async function GET(request: NextRequest, { params }: Params) {
         timeZone: timeZone ?? "default",
         error: error instanceof Error ? error.message : error
       });
-      return createEmptyLinkAnalyticsData();
+      return null;
     });
     return NextResponse.json({ link, analytics, analyticsFallback });
   } catch (error) {

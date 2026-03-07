@@ -317,13 +317,13 @@ export default function LinkDetailPageClient({ initialLink, initialAnalytics }: 
         });
         const payload = (await response.json().catch(() => null)) as
           | {
-              analytics?: LinkAnalyticsData;
+              analytics?: LinkAnalyticsData | null;
               analyticsFallback?: boolean;
               error?: string;
             }
           | null;
 
-        if (!response.ok || !payload?.analytics) {
+        if (!response.ok || !payload) {
           throw new Error(toErrorMessage(payload, "Failed to fetch link analytics"));
         }
 
@@ -331,14 +331,14 @@ export default function LinkDetailPageClient({ initialLink, initialAnalytics }: 
           return;
         }
 
-        setAnalytics(payload.analytics);
-        setAnalyticsFallback(Boolean(payload.analyticsFallback));
+        setAnalytics(payload.analytics ?? null);
+        setAnalyticsFallback(Boolean(payload.analyticsFallback) || !payload.analytics);
       } catch (error) {
         console.error("link detail analytics fetch fallback", error);
         if (cancelled) {
           return;
         }
-        setAnalytics(EMPTY_LINK_ANALYTICS);
+        setAnalytics(null);
         setAnalyticsFallback(true);
       } finally {
         if (!cancelled) {
@@ -663,6 +663,8 @@ export default function LinkDetailPageClient({ initialLink, initialAnalytics }: 
                   </div>
                 </div>
               </div>
+            ) : !analytics ? (
+              <p className="rb-feedback">{analyticsFallback ? copy.analyticsUnavailable : copy.notEnoughData}</p>
             ) : (
               <>
                 {analyticsFallback ? <p className="rb-feedback">{copy.analyticsUnavailable}</p> : null}
@@ -716,6 +718,8 @@ export default function LinkDetailPageClient({ initialLink, initialAnalytics }: 
             <h3>{copy.bestShareTime}</h3>
             {analyticsLoading ? (
               <p className="rb-muted">{copy.loadingAnalytics}</p>
+            ) : !analytics ? (
+              <p className="rb-muted">{analyticsFallback ? copy.analyticsUnavailable : copy.notEnoughData}</p>
             ) : bestHours.length === 0 ? (
               <p className="rb-muted">{copy.notEnoughData}</p>
             ) : (

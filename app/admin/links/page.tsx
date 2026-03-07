@@ -2,11 +2,7 @@ import { redirect } from "next/navigation";
 import AdminLinksPageClient from "@/components/admin-links-page-client";
 import { isAdminAuthenticated } from "@/lib/auth";
 import { loadAdminLinksPageData } from "@/lib/admin-links-page-data";
-import {
-  createEmptyGlobalAnalyticsData,
-  getAdminSettings,
-  type PaginatedShortLinks
-} from "@/lib/links";
+import { getAdminSettings, type PaginatedShortLinks } from "@/lib/links";
 import type { AdminSettings } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -70,13 +66,11 @@ export default async function AdminLinksPage({ searchParams }: LinksPageProps) {
   } catch (error) {
     console.error("admin links page load fallback", error);
   }
-  const initialGlobalAnalytics = createEmptyGlobalAnalyticsData(links.total);
-
   return (
     <AdminLinksPageClient
       initialLinks={links}
       initialLinkStatsFallback={initialLinkStatsFallback}
-      initialGlobalAnalytics={initialGlobalAnalytics}
+      initialGlobalAnalytics={null}
       initialGlobalAnalyticsLoaded={false}
       initialSettings={settings}
     />

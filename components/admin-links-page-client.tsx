@@ -14,7 +14,7 @@ import type { AdminSettings } from "@/lib/types";
 interface AdminLinksPageClientProps {
   initialLinks: PaginatedShortLinks;
   initialLinkStatsFallback: boolean;
-  initialGlobalAnalytics: GlobalAnalyticsData;
+  initialGlobalAnalytics: GlobalAnalyticsData | null;
   initialGlobalAnalyticsLoaded: boolean;
   initialSettings: AdminSettings;
 }
@@ -334,9 +334,9 @@ export default function AdminLinksPageClient({
 }: AdminLinksPageClientProps) {
   const safeInitialLinks = normalizeLinksPayload(initialLinks);
   const [links, setLinks] = useState<PaginatedShortLinks>(safeInitialLinks);
-  const [globalAnalytics, setGlobalAnalytics] = useState<GlobalAnalyticsData>(initialGlobalAnalytics);
+  const [globalAnalytics, setGlobalAnalytics] = useState<GlobalAnalyticsData | null>(initialGlobalAnalytics);
   const [globalAnalyticsLoaded, setGlobalAnalyticsLoaded] = useState(initialGlobalAnalyticsLoaded);
-  const [globalAnalyticsFallback, setGlobalAnalyticsFallback] = useState(false);
+  const [globalAnalyticsFallback, setGlobalAnalyticsFallback] = useState(initialGlobalAnalyticsLoaded && !initialGlobalAnalytics);
   const [linkStatsFallback, setLinkStatsFallback] = useState(initialLinkStatsFallback);
   const [settings, setSettings] = useState<AdminSettings>(initialSettings);
   const [linkAnalytics, setLinkAnalytics] = useState<Record<string, LinkAnalyticsData>>({});
@@ -439,6 +439,7 @@ export default function AdminLinksPageClient({
   }, [activeSection, globalAnalyticsLoaded]);
 
   const copy = words[lang];
+  const hasGlobalAnalytics = globalAnalytics !== null;
   const analyticsRangeOptions = useMemo(
     () => [
       { value: "today" as const, label: copy.rangeToday },
@@ -450,33 +451,36 @@ export default function AdminLinksPageClient({
   );
 
   const statsCards = useMemo(
-    () => [
-      { label: copy.totalLinks, value: globalAnalytics.totalLinks },
-      { label: copy.rangeClicks, value: globalAnalytics.clicksLast7Days },
-      { label: copy.redirects, value: globalAnalytics.overview.redirects },
-      { label: copy.visits, value: globalAnalytics.overview.visits }
-    ],
+    () =>
+      globalAnalytics
+        ? [
+            { label: copy.totalLinks, value: globalAnalytics.totalLinks },
+            { label: copy.rangeClicks, value: globalAnalytics.clicksLast7Days },
+            { label: copy.redirects, value: globalAnalytics.overview.redirects },
+            { label: copy.visits, value: globalAnalytics.overview.visits }
+          ]
+        : [],
     [
       copy.rangeClicks,
       copy.redirects,
       copy.totalLinks,
       copy.visits,
-      globalAnalytics.clicksLast7Days,
-      globalAnalytics.overview.redirects,
-      globalAnalytics.overview.visits,
-      globalAnalytics.totalLinks
+      globalAnalytics
     ]
   );
 
   const funnelCards = useMemo(
-    () => [
-      { label: copy.visits, value: globalAnalytics.overview.visits },
-      { label: copy.landingViews, value: globalAnalytics.overview.landingViews },
-      { label: copy.humanClicks, value: globalAnalytics.overview.humanClicks },
-      { label: copy.redirects, value: globalAnalytics.overview.redirects },
-      { label: copy.botHits, value: globalAnalytics.overview.botHits },
-      { label: copy.prefetchHits, value: globalAnalytics.overview.prefetchHits }
-    ],
+    () =>
+      globalAnalytics
+        ? [
+            { label: copy.visits, value: globalAnalytics.overview.visits },
+            { label: copy.landingViews, value: globalAnalytics.overview.landingViews },
+            { label: copy.humanClicks, value: globalAnalytics.overview.humanClicks },
+            { label: copy.redirects, value: globalAnalytics.overview.redirects },
+            { label: copy.botHits, value: globalAnalytics.overview.botHits },
+            { label: copy.prefetchHits, value: globalAnalytics.overview.prefetchHits }
+          ]
+        : [],
     [
       copy.botHits,
       copy.humanClicks,
@@ -484,22 +488,18 @@ export default function AdminLinksPageClient({
       copy.prefetchHits,
       copy.redirects,
       copy.visits,
-      globalAnalytics.overview.botHits,
-      globalAnalytics.overview.humanClicks,
-      globalAnalytics.overview.landingViews,
-      globalAnalytics.overview.prefetchHits,
-      globalAnalytics.overview.redirects,
-      globalAnalytics.overview.visits
+      globalAnalytics
     ]
   );
 
-  const totalTrackedEvents =
-    globalAnalytics.overview.visits +
-    globalAnalytics.overview.landingViews +
-    globalAnalytics.overview.humanClicks +
-    globalAnalytics.overview.redirects +
-    globalAnalytics.overview.botHits +
-    globalAnalytics.overview.prefetchHits;
+  const totalTrackedEvents = globalAnalytics
+    ? globalAnalytics.overview.visits +
+      globalAnalytics.overview.landingViews +
+      globalAnalytics.overview.humanClicks +
+      globalAnalytics.overview.redirects +
+      globalAnalytics.overview.botHits +
+      globalAnalytics.overview.prefetchHits
+    : 0;
 
   const activeLinkAnalytics = activeLinkStats ? linkAnalytics[activeLinkStats.id] : null;
 
@@ -560,14 +560,14 @@ export default function AdminLinksPageClient({
         | {
             links?: PaginatedShortLinks;
             linkStatsFallback?: boolean;
-            globalAnalytics?: GlobalAnalyticsData;
+            globalAnalytics?: GlobalAnalyticsData | null;
             globalAnalyticsFallback?: boolean;
             settings?: AdminSettings;
             error?: string;
           }
         | null;
 
-      if (!response.ok || !payload?.links || !payload?.settings || (includeAnalytics && !payload?.globalAnalytics)) {
+      if (!response.ok || !payload?.links || !payload?.settings) {
         throw new Error(toErrorMessage(payload, "Failed to refresh links"));
       }
 
@@ -575,8 +575,8 @@ export default function AdminLinksPageClient({
       setLinks(nextLinks);
       setLinkStatsFallback(Boolean(payload.linkStatsFallback));
       setSettings(payload.settings);
-      if (payload.globalAnalytics) {
-        setGlobalAnalytics(payload.globalAnalytics);
+      if (includeAnalytics) {
+        setGlobalAnalytics(payload.globalAnalytics ?? null);
         setGlobalAnalyticsFallback(Boolean(payload.globalAnalyticsFallback));
         setGlobalAnalyticsLoaded(true);
         setLoadedAnalyticsRange(requestAnalyticsRange);
@@ -715,20 +715,25 @@ export default function AdminLinksPageClient({
       });
       const payload = (await response.json().catch(() => null)) as
         | {
-            analytics?: LinkAnalyticsData;
+            analytics?: LinkAnalyticsData | null;
             analyticsFallback?: boolean;
             error?: string;
           }
         | null;
-      if (!response.ok || !payload?.analytics) {
+      if (!response.ok || !payload) {
         throw new Error(toErrorMessage(payload, "Failed to fetch link analytics"));
       }
-      setLinkAnalytics((current) => ({
-        ...current,
-        [linkId]: payload.analytics as LinkAnalyticsData
-      }));
+      const nextAnalytics = payload.analytics;
+      if (nextAnalytics) {
+        setLinkAnalytics((current) => ({
+          ...current,
+          [linkId]: nextAnalytics
+        }));
+      }
       if (payload.analyticsFallback) {
         showToast(copy.analyticsFallbackHint, "info");
+      } else if (!payload.analytics) {
+        showToast(copy.noData, "info");
       }
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Failed to fetch link analytics", "error");
@@ -818,7 +823,7 @@ export default function AdminLinksPageClient({
 
       {loading && !(activeSection === "analytics" && !globalAnalyticsLoaded) ? <p className="rb-feedback">{copy.refreshLinks}</p> : null}
       {!settings.trackingEnabled ? <p className="rb-feedback">{copy.trackingDisabledHint}</p> : null}
-      {settings.trackingEnabled && globalAnalyticsLoaded && !globalAnalyticsFallback && totalTrackedEvents === 0 ? (
+      {settings.trackingEnabled && hasGlobalAnalytics && globalAnalyticsLoaded && !globalAnalyticsFallback && totalTrackedEvents === 0 ? (
         <p className="rb-feedback">{copy.zeroStatsHint}</p>
       ) : null}
 
@@ -857,46 +862,52 @@ export default function AdminLinksPageClient({
                 </select>
               </label>
             </div>
-            {globalAnalyticsFallback ? <p className="rb-feedback">{copy.analyticsFallbackHint}</p> : null}
-            <div className="rb-global-metrics">
-              {statsCards.map((item) => (
-                <article key={item.label}>
-                  <span>{item.label}</span>
-                  <strong>{formatNumber(item.value, lang)}</strong>
-                </article>
-              ))}
-            </div>
-            <div className="rb-global-metrics">
-              {funnelCards.map((item) => (
-                <article key={item.label}>
-                  <span>{item.label}</span>
-                  <strong>{formatNumber(item.value, lang)}</strong>
-                </article>
-              ))}
-            </div>
-            <ChartErrorBoundary fallbackMessage={copy.chartsUnavailable}>
-              <AdminCharts
-                mode="rebrandly"
-                lang={lang}
-                overview={globalAnalytics.overview}
-                timeseries={globalAnalytics.timeseries}
-                worldMap={globalAnalytics.worldMap}
-                topCities={globalAnalytics.topCities}
-                topRegions={globalAnalytics.topRegions}
-                topDays={globalAnalytics.topDays}
-                popularHours={globalAnalytics.popularHours}
-                clickType={globalAnalytics.clickType}
-                topSocialPlatforms={globalAnalytics.topSocialPlatforms}
-                topSources={globalAnalytics.topSources}
-                topBrowsers={globalAnalytics.topBrowsers}
-                topDevices={globalAnalytics.topDevices}
-                topLanguages={globalAnalytics.topLanguages}
-                topPlatforms={globalAnalytics.topPlatforms}
-              />
-            </ChartErrorBoundary>
-            <div className="rb-report-grid rb-global-lists">
-              <StatsList title={copy.topLinks} items={globalAnalytics.topLinks} lang={lang} />
-            </div>
+            {!globalAnalytics ? (
+              <p className="rb-feedback">{globalAnalyticsFallback ? copy.analyticsFallbackHint : copy.noData}</p>
+            ) : (
+              <>
+                {globalAnalyticsFallback ? <p className="rb-feedback">{copy.analyticsFallbackHint}</p> : null}
+                <div className="rb-global-metrics">
+                  {statsCards.map((item) => (
+                    <article key={item.label}>
+                      <span>{item.label}</span>
+                      <strong>{formatNumber(item.value, lang)}</strong>
+                    </article>
+                  ))}
+                </div>
+                <div className="rb-global-metrics">
+                  {funnelCards.map((item) => (
+                    <article key={item.label}>
+                      <span>{item.label}</span>
+                      <strong>{formatNumber(item.value, lang)}</strong>
+                    </article>
+                  ))}
+                </div>
+                <ChartErrorBoundary fallbackMessage={copy.chartsUnavailable}>
+                  <AdminCharts
+                    mode="rebrandly"
+                    lang={lang}
+                    overview={globalAnalytics.overview}
+                    timeseries={globalAnalytics.timeseries}
+                    worldMap={globalAnalytics.worldMap}
+                    topCities={globalAnalytics.topCities}
+                    topRegions={globalAnalytics.topRegions}
+                    topDays={globalAnalytics.topDays}
+                    popularHours={globalAnalytics.popularHours}
+                    clickType={globalAnalytics.clickType}
+                    topSocialPlatforms={globalAnalytics.topSocialPlatforms}
+                    topSources={globalAnalytics.topSources}
+                    topBrowsers={globalAnalytics.topBrowsers}
+                    topDevices={globalAnalytics.topDevices}
+                    topLanguages={globalAnalytics.topLanguages}
+                    topPlatforms={globalAnalytics.topPlatforms}
+                  />
+                </ChartErrorBoundary>
+                <div className="rb-report-grid rb-global-lists">
+                  <StatsList title={copy.topLinks} items={globalAnalytics.topLinks} lang={lang} />
+                </div>
+              </>
+            )}
           </section>
         )
       ) : activeSection === "settings" ? (

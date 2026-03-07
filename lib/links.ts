@@ -1681,44 +1681,64 @@ export async function getGlobalAnalyticsData(options?: {
     return cachedRuntimeGlobalAnalytics.data;
   }
 
-  const window = getAnalyticsWindow(resolvedRange, resolvedTimeZone, nowMs);
-  const [{ count, error }, aggregated] = await Promise.all([
-    getSupabaseAdminClient().from("short_links").select("id", { head: true, count: "exact" }).eq("is_active", true),
-    aggregateGlobalAnalytics(window)
-  ]);
+  const startedAt = Date.now();
+  try {
+    const window = getAnalyticsWindow(resolvedRange, resolvedTimeZone, nowMs);
+    const [{ count, error }, aggregated] = await Promise.all([
+      getSupabaseAdminClient().from("short_links").select("id", { head: true, count: "exact" }).eq("is_active", true),
+      aggregateGlobalAnalytics(window)
+    ]);
 
-  if (error) {
-    throw new Error(`getGlobalAnalyticsData total links failed: ${error.message}`);
+    if (error) {
+      throw new Error(`getGlobalAnalyticsData total links failed: ${error.message}`);
+    }
+
+    const data: GlobalAnalyticsData = {
+      totalLinks: toNumber(count ?? 0),
+      clicksLast7Days: aggregated.clicksLast7Days,
+      topLinks: aggregated.topLinks,
+      overview: aggregated.overview,
+      timeseries: aggregated.timeseries,
+      worldMap: aggregated.worldMap,
+      topCities: aggregated.topCities,
+      topRegions: aggregated.topRegions,
+      topDays: aggregated.topDays,
+      popularHours: aggregated.popularHours,
+      clickType: aggregated.clickType,
+      topSocialPlatforms: aggregated.topSocialPlatforms,
+      topSources: aggregated.topSources,
+      topBrowsers: aggregated.topBrowsers,
+      topDevices: aggregated.topDevices,
+      topLanguages: aggregated.topLanguages,
+      topPlatforms: aggregated.topPlatforms
+    };
+
+    cachedRuntimeGlobalAnalytics = {
+      data,
+      expiresAt: Date.now() + GLOBAL_ANALYTICS_CACHE_TTL_MS,
+      timeZone: resolvedTimeZone,
+      range: resolvedRange
+    };
+
+    console.info("getGlobalAnalyticsData resolved", {
+      durationMs: Date.now() - startedAt,
+      range: resolvedRange,
+      timeZone: resolvedTimeZone,
+      linksCount: data.totalLinks,
+      fallbackUsed: false
+    });
+
+    return data;
+  } catch (error) {
+    console.error("getGlobalAnalyticsData failed", {
+      durationMs: Date.now() - startedAt,
+      range: resolvedRange,
+      timeZone: resolvedTimeZone,
+      fallbackUsed: true,
+      error: error instanceof Error ? error.message : error
+    });
+    throw error;
   }
-
-  const data: GlobalAnalyticsData = {
-    totalLinks: toNumber(count ?? 0),
-    clicksLast7Days: aggregated.clicksLast7Days,
-    topLinks: aggregated.topLinks,
-    overview: aggregated.overview,
-    timeseries: aggregated.timeseries,
-    worldMap: aggregated.worldMap,
-    topCities: aggregated.topCities,
-    topRegions: aggregated.topRegions,
-    topDays: aggregated.topDays,
-    popularHours: aggregated.popularHours,
-    clickType: aggregated.clickType,
-    topSocialPlatforms: aggregated.topSocialPlatforms,
-    topSources: aggregated.topSources,
-    topBrowsers: aggregated.topBrowsers,
-    topDevices: aggregated.topDevices,
-    topLanguages: aggregated.topLanguages,
-    topPlatforms: aggregated.topPlatforms
-  };
-
-  cachedRuntimeGlobalAnalytics = {
-    data,
-    expiresAt: nowMs + GLOBAL_ANALYTICS_CACHE_TTL_MS,
-    timeZone: resolvedTimeZone,
-    range: resolvedRange
-  };
-
-  return data;
 }
 
 export async function getGlobalLinksStats(): Promise<GlobalLinksStats> {
@@ -2433,11 +2453,38 @@ async function getLinkAnalyticsDataViaQueries(linkId: string, timeZone: string):
 
 export async function getLinkAnalyticsData(linkId: string, timeZone?: string): Promise<LinkAnalyticsData> {
   const resolvedTimeZone = resolveAnalyticsTimeZone(timeZone);
+  const cacheKey = `${linkId}:${resolvedTimeZone}`;
+  const nowMs = Date.now();
+  const cached = cachedRuntimeLinkAnalytics.get(cacheKey);
+  if (cached && cached.expiresAt > nowMs) {
+    return cached.data;
+  }
+
+  const startedAt = Date.now();
   try {
-    return await getLinkAnalyticsDataViaQueries(linkId, resolvedTimeZone);
+    const data = await getLinkAnalyticsDataFromEvents(linkId, resolvedTimeZone);
+    cachedRuntimeLinkAnalytics.set(cacheKey, {
+      data,
+      expiresAt: Date.now() + LINK_ANALYTICS_CACHE_TTL_MS
+    });
+
+    console.info("getLinkAnalyticsData resolved", {
+      linkId,
+      timeZone: resolvedTimeZone,
+      durationMs: Date.now() - startedAt,
+      fallbackUsed: false
+    });
+
+    return data;
   } catch (error) {
-    console.error("getLinkAnalyticsData fallback to empty payload", error);
-    return createEmptyLinkAnalyticsData();
+    console.error("getLinkAnalyticsData failed", {
+      linkId,
+      timeZone: resolvedTimeZone,
+      durationMs: Date.now() - startedAt,
+      fallbackUsed: true,
+      error: error instanceof Error ? error.message : error
+    });
+    throw error;
   }
 }
 
