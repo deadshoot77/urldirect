@@ -2010,6 +2010,19 @@ export async function deleteShortLink(id: string): Promise<void> {
   }
 }
 
+export type TruncatableTable = "logs" | "click_events";
+
+export async function truncateTrackingTable(table: TruncatableTable): Promise<number> {
+  const { error, count } = await getSupabaseAdminClient()
+    .from(table)
+    .delete({ count: "exact" })
+    .gte("created_at", "1970-01-01");
+  if (error) {
+    throw new Error(`truncate ${table} failed: ${error.message}`);
+  }
+  return count ?? 0;
+}
+
 export async function getLinkOverview(linkId: string): Promise<LinkOverviewStats> {
   const rows = await runRpcList<OverviewRow>("get_link_overview", { p_link_id: linkId });
   const row = rows[0];

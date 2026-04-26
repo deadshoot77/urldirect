@@ -61,6 +61,16 @@ const words = {
     globalBackground: "Image de fond globale",
     saveSettings: "Sauvegarder parametres",
     savingSettings: "Sauvegarde...",
+    dangerZone: "Zone sensible",
+    dangerZoneHint: "Liberer du quota Supabase en vidant les tables de tracking. Action irreversible.",
+    truncateLogs: "Vider la table logs",
+    truncatingLogs: "Suppression des logs...",
+    truncateClickEvents: "Vider la table click_events",
+    truncatingClickEvents: "Suppression des click_events...",
+    confirmTruncateLogs: "Vider entierement la table logs ? Tous les enregistrements seront supprimes definitivement.",
+    confirmTruncateClickEvents: "Vider entierement la table click_events ? Tous les enregistrements seront supprimes definitivement.",
+    truncateSuccess: "Table videe ({count} lignes supprimees)",
+    truncateFailed: "Echec de la suppression",
     visits: "Visites",
     landingViews: "Vues landing",
     humanClicks: "Clics humains",
@@ -149,6 +159,16 @@ const words = {
     globalBackground: "Global background image",
     saveSettings: "Save settings",
     savingSettings: "Saving...",
+    dangerZone: "Danger zone",
+    dangerZoneHint: "Free up Supabase quota by truncating tracking tables. This is irreversible.",
+    truncateLogs: "Truncate logs table",
+    truncatingLogs: "Truncating logs...",
+    truncateClickEvents: "Truncate click_events table",
+    truncatingClickEvents: "Truncating click_events...",
+    confirmTruncateLogs: "Truncate the entire logs table? All rows will be permanently deleted.",
+    confirmTruncateClickEvents: "Truncate the entire click_events table? All rows will be permanently deleted.",
+    truncateSuccess: "Table truncated ({count} rows deleted)",
+    truncateFailed: "Truncate failed",
     visits: "Visits",
     landingViews: "Landing views",
     humanClicks: "Human clicks",
@@ -362,6 +382,7 @@ export default function AdminLinksPageClient({
   const [origin, setOrigin] = useState("");
   const [clientTimeZone, setClientTimeZone] = useState("Europe/Paris");
   const [savingSettings, setSavingSettings] = useState(false);
+  const [truncatingTable, setTruncatingTable] = useState<"logs" | "click_events" | null>(null);
   const [deletingLinkId, setDeletingLinkId] = useState<string | null>(null);
   const [globalBackgroundUrl, setGlobalBackgroundUrl] = useState(initialSettings.globalBackgroundUrl ?? "");
   const [loadingDots, setLoadingDots] = useState("");
@@ -624,6 +645,37 @@ export default function AdminLinksPageClient({
       showToast(error instanceof Error ? error.message : copy.failedSave, "error");
     } finally {
       setSavingSettings(false);
+    }
+  }
+
+  async function truncateTable(table: "logs" | "click_events") {
+    const confirmMessage = table === "logs" ? copy.confirmTruncateLogs : copy.confirmTruncateClickEvents;
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+
+    setTruncatingTable(table);
+    try {
+      const response = await fetch("/api/admin/truncate", {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ table })
+      });
+
+      const payload = (await response.json().catch(() => null)) as { ok?: boolean; deleted?: number; error?: string } | null;
+      if (!response.ok || !payload?.ok) {
+        throw new Error(toErrorMessage(payload, copy.truncateFailed));
+      }
+
+      const message = copy.truncateSuccess.replace("{count}", String(payload.deleted ?? 0));
+      showToast(message, "success");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : copy.truncateFailed, "error");
+    } finally {
+      setTruncatingTable(null);
     }
   }
 
@@ -954,6 +1006,29 @@ export default function AdminLinksPageClient({
           <div className="rb-actions">
             <button type="button" className="rb-primary" disabled={savingSettings} onClick={() => void saveSettings()}>
               {savingSettings ? copy.savingSettings : copy.saveSettings}
+            </button>
+          </div>
+
+          <hr style={{ margin: "24px 0", border: "none", borderTop: "1px solid var(--border, #2a2a2a)" }} />
+
+          <h3>{copy.dangerZone}</h3>
+          <p className="rb-muted">{copy.dangerZoneHint}</p>
+          <div className="rb-actions" style={{ flexWrap: "wrap", gap: "8px" }}>
+            <button
+              type="button"
+              className="rb-danger"
+              disabled={truncatingTable !== null}
+              onClick={() => void truncateTable("logs")}
+            >
+              {truncatingTable === "logs" ? copy.truncatingLogs : copy.truncateLogs}
+            </button>
+            <button
+              type="button"
+              className="rb-danger"
+              disabled={truncatingTable !== null}
+              onClick={() => void truncateTable("click_events")}
+            >
+              {truncatingTable === "click_events" ? copy.truncatingClickEvents : copy.truncateClickEvents}
             </button>
           </div>
         </section>
